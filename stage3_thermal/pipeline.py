@@ -8,6 +8,9 @@ calculator per building, and writes:
 
 Added columns (on top of all Stage 2 columns):
   roof_r_value_m2k              — R_roof inferred from building attributes
+  h_out_w_m2k                   — outdoor surface coefficient (wind-derived from
+                                   Stage 2's mean_wind_speed_ms when available,
+                                   else the fixed H_OUTSIDE_W_M2K fallback)
   heat_transfer_fraction        — effective roof→interior fraction (incl. multistorey)
   heat_to_interior_kwh_yr       — roof heat that reaches the interior
   cooling_load_reduction_kwh_yr — subset that drives the cooling system
@@ -69,11 +72,13 @@ def run_stage3(suburb_name: str) -> pd.DataFrame:
     logger.info("Step 2/2: Computing thermal benefit per building...")
     thermal_rows = []
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Thermal calc"):
+        wind = row.get("mean_wind_speed_ms")
         result = calculate_thermal_benefit(
             energy_saved_kwh_yr=float(row.get("energy_saved_kwh_yr", 0.0)),
             roof_material=row.get("roof_material"),
             building_type=row.get("building_type"),
             levels=row.get("levels"),
+            wind_speed_ms=float(wind) if wind is not None and str(wind) != "nan" else None,
         )
         thermal_rows.append(result)
 
@@ -111,6 +116,12 @@ def run_stage3(suburb_name: str) -> pd.DataFrame:
     logger.info(
         "Equivalent households powered : %.1f households/yr",
         equiv_households,
+    )
+    n_wind = df["mean_wind_speed_ms"].notna().sum() if "mean_wind_speed_ms" in df.columns else 0
+    logger.info(
+        "Outdoor surface coefficient   : mean h_out %.2f W/m²K (wind-derived for "
+        "%d/%d buildings, fixed fallback for the rest)",
+        df["h_out_w_m2k"].mean(), n_wind, len(df),
     )
 
     # ── Save outputs ──────────────────────────────────────────────────────────

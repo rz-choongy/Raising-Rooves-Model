@@ -5,7 +5,7 @@ Accesses the Bureau of Meteorology's BARRA2 reanalysis dataset via
 OPeNDAP on the NCI THREDDS server. BARRA2 provides:
   - ~11 km spatial resolution (AUS-11 BARRA-R2 grid)
   - Hourly temporal resolution
-  - Variables: solar irradiance (rsds), temperature (tas)
+  - Variables: solar irradiance (rsds), temperature (tas), wind speed (sfcWind)
 
 Data is cached locally as NetCDF files to avoid repeated downloads.
 
@@ -39,10 +39,11 @@ When NCI project ob53 access lands, here is exactly what to do:
 3. Run a single-suburb smoke test:
        python -m stage2_irradiance.run_stage2 --suburb Carlton --debug
 
-   This calls fetch_all_climate_data() → fetch_barra_data() for both
-   solar_irradiance (rsds) and temperature_2m (tas), one year at a time,
-   12 months per year.  Each month is a separate OPeNDAP request.
-   Cached under data/raw/barra/{solar_irradiance,temperature_2m}/.
+   This calls fetch_all_climate_data() → fetch_barra_data() for
+   solar_irradiance (rsds), temperature_2m (tas), and wind_speed_10m
+   (sfcWind), one year at a time, 12 months per year.  Each month is a
+   separate OPeNDAP request.
+   Cached under data/raw/barra/{solar_irradiance,temperature_2m,wind_speed_10m}/.
 
 4. The Stage 2 pipeline then:
    a. Computes monthly irradiance stats via compute_irradiance_stats()
@@ -318,27 +319,32 @@ def ingest_barra2_csv(
         time_UTC, rsds_total_Wm2, temp_C
 
     The file may also carry extra columns (rsdsdir_Wm2, rsdsdif_Wm2, temp_K,
-    rel_humidity_percent, wind_ms) — they are ignored.
+    rel_humidity_percent) — they are ignored. An optional ``wind_ms`` column
+    (10 m wind speed, m/s) IS used when present, to compute an annual mean
+    wind speed for Stage 3's wind-dependent h_out.
 
     Args:
         csv_path: Path to the hourly BARRA2 CSV file.
         suburb_name: Suburb name for labelling output rows.
 
     Returns:
-        (climate_df, annual_ghi_kwh_m2) where *climate_df* has monthly
-        irradiance and temperature stats (same schema as the OPeNDAP path)
-        and *annual_ghi_kwh_m2* is the hourly-derived annual GHI scalar.
-        Returns (empty DataFrame, None) when the CSV is missing or unreadable.
+        (climate_df, annual_ghi_kwh_m2, annual_mean_wind_speed_ms) where
+        *climate_df* has monthly irradiance and temperature stats (same
+        schema as the OPeNDAP path), *annual_ghi_kwh_m2* is the hourly-derived
+        annual GHI scalar, and *annual_mean_wind_speed_ms* is the mean of the
+        ``wind_ms`` column (None if that column isn't present).
+        Returns (empty DataFrame, None, None) when the CSV is missing or
+        unreadable.
     """
     if not csv_path.exists():
         logger.warning("BARRA2 CSV not found: %s", csv_path)
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
     try:
         df = pd.read_csv(csv_path, parse_dates=["time_UTC"])
     except Exception as e:
         logger.warning("Failed to read BARRA2 CSV %s: %s", csv_path, e)
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
     required = {"time_UTC", "rsds_total_Wm2", "temp_C"}
     missing = required - set(df.columns)
@@ -347,7 +353,7 @@ def ingest_barra2_csv(
             "BARRA2 CSV %s is missing required columns: %s. Found: %s",
             csv_path, missing, set(df.columns),
         )
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
     logger.info(
         "Ingesting BARRA2 hourly CSV: %s (%d rows, %d columns).",
@@ -420,11 +426,22 @@ def ingest_barra2_csv(
             annual_ghi, mean_w_m2, len(valid_rsds),
         )
 
+    # ── Annual mean wind speed (optional column) ────────────────────────────
+    annual_wind_ms: float | None = None
+    if "wind_ms" in df.columns:
+        valid_wind = df["wind_ms"].dropna()
+        if len(valid_wind) > 0:
+            annual_wind_ms = round(float(valid_wind.mean()), 2)
+            logger.info(
+                "BARRA2 CSV annual mean wind speed: %.2f m/s (%d hours).",
+                annual_wind_ms, len(valid_wind),
+            )
+
     logger.info(
         "BARRA2 CSV ingestion complete: %d monthly rows, annual GHI %s kWh/m²/yr.",
         len(combined), f"{annual_ghi:.0f}" if annual_ghi is not None else "N/A",
     )
-    return combined, annual_ghi
+    return combined, annual_ghi, annual_wind_ms
 
 
 def fetch_all_climate_data(
@@ -446,6 +463,6 @@ def fetch_all_climate_data(
         Dict mapping variable keys to xarray Datasets (or None if failed).
     """
     results: dict[str, xr.Dataset | None] = {}
-    for key in ["solar_irradiance", "temperature_2m"]:
+    for key in ["solar_irradiance", "temperature_2m", "wind_speed_10m"]:
         results[key] = fetch_barra_data(key, lat, lon, start_year, end_year)
     return results

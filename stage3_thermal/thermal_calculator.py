@@ -14,16 +14,26 @@ roof thermal resistance R_roof (m²·K/W), following the roof-only heat-ingress
 framing in Maggie's model:
 
     U_roof   = 1 / R_roof
-    fraction = U_roof / (U_roof + H_OUTSIDE_W_M2K)
+    fraction = U_roof / (U_roof + h_out)
+
+h_out (the outdoor surface film coefficient) is itself wind-dependent when a
+local BARRA2 wind speed is available (McAdams simple forced-convection
+correlation); it falls back to the fixed H_OUTSIDE_W_M2K constant otherwise.
+See H_OUT_WIND_INTERCEPT_W_M2K / H_OUT_WIND_SLOPE_W_M2K_PER_MS in
+config/settings.py for the correlation and its citation.
 
 Stage 1 provides no construction-age field, so R_roof is inferred from the
 attributes we have (building_type, levels, roof_material). All parameter
 defaults and their sources are documented in config/settings.py.
 """
 
+import math
+
 from config.settings import (
     COOLING_FRACTION,
     GRID_EMISSIONS_FACTOR_KG_KWH,
+    H_OUT_WIND_INTERCEPT_W_M2K,
+    H_OUT_WIND_SLOPE_W_M2K_PER_MS,
     H_OUTSIDE_W_M2K,
     HVAC_COP_COMMERCIAL,
     HVAC_COP_RESIDENTIAL,
@@ -88,21 +98,52 @@ def _r_roof_for_building(btype: str, roof_material: str | None) -> float:
     return R_ROOF_DEFAULT
 
 
-def _heat_fraction_from_r_roof(r_roof: float) -> float:
+def _h_out_from_wind(wind_speed_ms: float | None) -> float:
+    """
+    Outdoor surface film coefficient h_out (W/m²K) as a function of local wind speed.
+
+    Uses the McAdams (1954) simple forced-convection correlation for an
+    exterior building surface (also used by EnergyPlus's "SimpleCombined"
+    exterior convection algorithm):
+
+        h_out = H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * V
+
+    More wind → higher h_out → the roof sheds absorbed heat back to the
+    outside air more efficiently → a SMALLER fraction of it conducts inward
+    (see _heat_fraction_from_r_roof). Falls back to the fixed H_OUTSIDE_W_M2K
+    default (ISO 6946 still-air surface coefficient) when no wind speed is
+    available — this reproduces the pre-wind-model behaviour exactly.
+
+    Args:
+        wind_speed_ms: Local 10 m wind speed in m/s (BARRA2 sfcWind), or None.
+
+    Returns:
+        h_out in W/m²K.
+    """
+    if wind_speed_ms is None or (isinstance(wind_speed_ms, float) and math.isnan(wind_speed_ms)):
+        return H_OUTSIDE_W_M2K
+    v = max(0.0, float(wind_speed_ms))
+    return H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * v
+
+
+def _heat_fraction_from_r_roof(r_roof: float, h_out: float = H_OUTSIDE_W_M2K) -> float:
     """
     Fraction of the absorbed-solar delta that conducts to the interior.
 
-    fraction = U_roof / (U_roof + H_OUTSIDE_W_M2K),  U_roof = 1 / R_roof.
+    fraction = U_roof / (U_roof + h_out),  U_roof = 1 / R_roof.
 
     Args:
         r_roof: Roof thermal resistance in m²·K/W (must be > 0).
+        h_out: Outdoor surface film coefficient in W/m²K (default: the fixed
+            H_OUTSIDE_W_M2K fallback — pass a wind-derived value from
+            _h_out_from_wind() to make this wind-dependent).
 
     Returns:
         Unitless heat-transfer fraction in (0, 1).
     """
     r = r_roof if r_roof and r_roof > 0 else R_ROOF_DEFAULT
     u_roof = 1.0 / r
-    return u_roof / (u_roof + H_OUTSIDE_W_M2K)
+    return u_roof / (u_roof + h_out)
 
 
 def calculate_thermal_benefit(
@@ -110,13 +151,14 @@ def calculate_thermal_benefit(
     roof_material: str | None = None,
     building_type: str | None = None,
     levels: int | None = None,
+    wind_speed_ms: float | None = None,
 ) -> dict:
     """
     Convert absorbed solar reduction into cooling electricity savings.
 
     Takes the Stage 2 ``energy_saved_kwh_yr`` (absorbed solar delta due to cool
     roof treatment) and propagates it through:
-      1. Roof-to-interior heat transfer (fraction derived from R_roof)
+      1. Roof-to-interior heat transfer (fraction derived from R_roof and h_out)
       2. Fraction driving active cooling demand (``COOLING_FRACTION``)
       3. HVAC efficiency (``HVAC_COP``)
 
@@ -135,10 +177,16 @@ def calculate_thermal_benefit(
             "commercial", "office"). Used to select HVAC COP and R_roof.
         levels: Number of building storeys from Stage 1. Used to apply the
             multistorey heat-path attenuation for tall buildings.
+        wind_speed_ms: Local mean 10 m wind speed in m/s (BARRA2 sfcWind, from
+            Stage 2's ``mean_wind_speed_ms`` column), or None. Drives h_out via
+            _h_out_from_wind() — None reproduces the pre-wind-model behaviour
+            (fixed H_OUTSIDE_W_M2K).
 
     Returns:
         Dict with keys:
             roof_r_value_m2k              (float, inferred R_roof)
+            h_out_w_m2k                   (float, wind-derived or fallback outdoor
+                                            surface coefficient)
             heat_transfer_fraction        (float, effective fraction incl. multistorey)
             heat_to_interior_kwh_yr       (float, rounded to 1 dp)
             cooling_load_reduction_kwh_yr (float, rounded to 1 dp)
@@ -160,9 +208,11 @@ def calculate_thermal_benefit(
     except (ValueError, TypeError):
         n_levels = 1
 
-    # Per-building roof insulation drives the base conductance fraction.
+    # Per-building roof insulation drives the base conductance fraction;
+    # h_out (wind-dependent when available) sets the outdoor side of it.
     r_roof = _r_roof_for_building(btype, roof_material)
-    base_fraction = _heat_fraction_from_r_roof(r_roof)
+    h_out = _h_out_from_wind(wind_speed_ms)
+    base_fraction = _heat_fraction_from_r_roof(r_roof, h_out)
 
     # Tall buildings have more thermal mass; less roof heat reaches occupants.
     multistorey = MULTISTOREY_ATTENUATION if n_levels >= 4 else 1.0
@@ -176,6 +226,7 @@ def calculate_thermal_benefit(
 
     return {
         "roof_r_value_m2k": round(r_roof, 2),
+        "h_out_w_m2k": round(h_out, 2),
         "heat_transfer_fraction": round(heat_fraction, 4),
         "heat_to_interior_kwh_yr": round(heat_to_interior, 1),
         "cooling_load_reduction_kwh_yr": round(cooling_load_reduction, 1),

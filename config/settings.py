@@ -75,6 +75,9 @@ BARRA2_VARIABLES = {
     "solar_irradiance": "rsds",
     # tas = near-surface (2 m) air temperature (K).
     "temperature_2m": "tas",
+    # sfcWind = near-surface (10 m) wind speed (m/s). Confirmed present in the
+    # AUS-11 BARRA-R2 1hr catalog alongside rsds/tas (same file-per-month layout).
+    "wind_speed_10m": "sfcWind",
 }
 
 # ── Melbourne Defaults ───────────────────────────────────────────────────────
@@ -139,7 +142,25 @@ MELBOURNE_DEFAULT_GHI_KWH_M2_YR = 1850.0
 # Produces ~200–600 kWh/yr for a typical Melbourne house, consistent with CSIRO
 # "Cool Roofs for Australian Homes" (2012).
 # TODO: validate against Stuart's NatHERS runs or AS/NZS 4859.1 simulation.
+#
+# H_OUTSIDE_W_M2K is now the FALLBACK value used when no local wind speed is
+# available (e.g. NASA POWER / Melbourne-default irradiance paths, which carry
+# no BARRA2 wind data). It equals the ISO 6946 standard external surface
+# coefficient (Rse = 0.04 m²K/W) — a fixed, wind-independent building-code
+# default, not a Melbourne-specific measurement.
+#
+# When BARRA2 wind data IS available, h_out is instead computed per suburb
+# from the local mean wind speed via the McAdams (1954) simple forced-
+# convection correlation for an exterior building surface — widely used in
+# building energy simulation (e.g. EnergyPlus's "SimpleCombined" exterior
+# convection algorithm):
+#   h_out = H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * V
+# Valid roughly over the 0–5 m/s range McAdams fit (typical suburban 10 m
+# wind); not re-validated here for Australian roof geometries specifically.
+# TODO: validate against Stuart's NatHERS runs or AS/NZS 4859.1 simulation.
 H_OUTSIDE_W_M2K = 25.0
+H_OUT_WIND_INTERCEPT_W_M2K = 5.7
+H_OUT_WIND_SLOPE_W_M2K_PER_MS = 3.8
 
 # Per-building roof thermal resistance R_roof (m²·K/W). Stage 1 gives us no
 # construction-age field, so R_roof is inferred from the attributes we do have
