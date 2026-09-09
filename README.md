@@ -130,13 +130,36 @@ data/output/stage3_{suburb}_report.html
 ### Strongly Recommended
 
 - Local footprint index:
-  `data/raw/footprints/buildings_index.gpkg` (~540 MB, built locally — see below)
+  `data/raw/footprints/buildings_index.gpkg` (~250 MB, built locally — see below)
 - Source footprint file for rebuilding the index:
-  `data/raw/footprints/melbourne_overture.geojsonl` (~1 GB). This is a
-  line-delimited GeoJSON export of Overture Maps / Microsoft AU building
-  footprints for the Melbourne area. It is too large for git — ask a teammate
-  for a copy (or the built `.gpkg` directly), then build the index once with:
+  `data/raw/footprints/melbourne_overture.geojsonl` (~650 MB for the Greater
+  Melbourne bbox). This is a line-delimited GeoJSON export of Overture Maps
+  building footprints (Microsoft ML Buildings dataset) for the Melbourne area.
+  It is too large for git and is not built by default.
+
+  Fetch it directly from Overture Maps' public dataset (no API key, no
+  teammate hand-off needed — Overture publishes to a public, unsigned S3
+  bucket):
+
+  ```bash
+  pip install overturemaps
+  python -m overturemaps download \
+    --bbox=144.8110,-38.1590,145.2350,-37.6310 \
+    -f geojsonseq -t building \
+    -o data/raw/footprints/melbourne_overture.geojsonl
+  ```
+
+  The bbox above covers all Greater Melbourne suburbs in `config/suburbs.py`
+  (excludes the regional Victoria suburbs, which would pull in a much larger,
+  mostly-empty area). Adjust it if you add suburbs outside that box. This
+  pulled ~980k buildings in under a minute on a normal connection.
+
+  Then build the spatial index once:
   `python -m tools.build_footprint_index`
+
+  (Alternative source, if you'd rather not install `overturemaps`: ask a
+  teammate for a copy of `melbourne_overture.geojsonl` or the built `.gpkg`
+  directly.)
 - Real irradiance CSV with columns:
   `lat, lon, annual_ghi_kwh_m2`
 - True suburb boundary polygon for final reporting. The current config uses
@@ -339,12 +362,17 @@ Stage 2 appends these columns to the Stage 1 table:
 
 | Column | Description |
 | --- | --- |
+| `azimuth_deg` | Building heading (0-360° CW from North): bearing of the outward normal to the long side of the minimum-rotated-rectangle fit to the footprint. Ambiguous by 180° — footprint shape alone can't tell front from back |
+| `wall_length_main_m` | Length of the rectangle's long side (assumes a rectangular footprint) |
+| `wall_length_perp_m` | Length of the rectangle's short (perpendicular) side |
+| `wall_ratio` | `wall_length_main_m / wall_length_perp_m` — ≥1; higher means a longer, narrower footprint |
 | `annual_ghi_kwh_m2` | Annual global horizontal irradiance at/near the building |
 | `absorptance_before` | Estimated pre-treatment solar absorptance |
 | `roof_surface_area_m2` | Roof surface area = footprint area / cos(pitch) |
 | `energy_incident_kwh_yr` | Annual incident solar energy on the footprint |
 | `energy_saved_kwh_yr` | Reduced absorbed solar energy after cool roof treatment |
 | `co2_saved_kg_yr` | CO2 avoided using the configured grid emissions factor |
+| `mean_wind_speed_ms` | Suburb-uniform BARRA2 10 m wind speed (`sfcWind`), or empty when the irradiance source isn't BARRA2. Feeds Stage 3's wind-dependent `h_out` |
 
 ## Running Stage 3
 
@@ -365,6 +393,7 @@ Stage 3 appends these columns to the Stage 2 table:
 | Column | Description |
 | --- | --- |
 | `roof_r_value_m2k` | Roof thermal resistance R_roof inferred from building attributes (m²·K/W) |
+| `h_out_w_m2k` | Outdoor surface coefficient — wind-derived from `mean_wind_speed_ms` when available, else the fixed 25 W/m²K fallback |
 | `heat_transfer_fraction` | Effective roof→interior fraction, `U/(U+h_out)`, incl. multistorey attenuation |
 | `heat_to_interior_kwh_yr` | Solar heat conducted through roof to building interior |
 | `cooling_load_reduction_kwh_yr` | Reduction in cooling load (subset of heat to interior) |
@@ -384,8 +413,22 @@ framing in Maggie's model:
 
 ```
 U_roof   = 1 / R_roof
-fraction = U_roof / (U_roof + h_out)     # h_out = 25 W/m²K
+fraction = U_roof / (U_roof + h_out)
 ```
+
+`h_out` (outdoor surface film coefficient) is wind-dependent when BARRA2 wind
+data is available, via the McAdams (1954) simple forced-convection
+correlation for an exterior building surface:
+
+```
+h_out = 5.7 + 3.8 * wind_speed_ms     # McAdams; falls back to 25 W/m²K when no wind data
+```
+
+More wind → higher `h_out` → the roof sheds absorbed heat back to the outside
+air more efficiently → a *smaller* fraction conducts inward. The fixed 25
+W/m²K fallback (ISO 6946's standard external surface coefficient) is used when
+the irradiance source isn't BARRA2 (NASA POWER, user CSV, Melbourne default) —
+this reproduces the pre-wind-model results exactly for those runs.
 
 `R_roof` is inferred from Stage 1 attributes (no construction-age field exists):
 
@@ -400,10 +443,16 @@ Other parameters:
 
 | Parameter | Value | Description |
 | --- | --- | --- |
-| Outdoor surface coefficient `h_out` | 25 W/m²K | Combined convective + radiative |
+| Outdoor surface coefficient `h_out` | `5.7 + 3.8×wind_ms` (McAdams), fallback 25 W/m²K | Wind-dependent when BARRA2 wind data is available |
 | Multistorey attenuation | ×0.5 for 4+ storeys | Extra thermal-mass/slab attenuation |
 | Cooling fraction | 0.70 | Fraction of interior heat gain driving active cooling |
 | HVAC COP | 3.0 (residential), 4.0 (commercial) | Split system / VRF baseline |
+
+**Known limitation:** the McAdams correlation is a standard building-energy-
+simulation default (also used by EnergyPlus's "SimpleCombined" exterior
+convection model), not re-validated here for Australian roof geometries or
+BARRA2's ~11 km wind resolution — same unvalidated-constant caveat as the rest
+of Stage 3.
 
 The R2.5 default reproduces the previous single heat-transfer constant, so
 well-insulated stock is unchanged while poorly-insulated stock now correctly
@@ -491,14 +540,17 @@ There is no fixed 12 by 12 grid assumption in the code.
 
 Current behaviour:
 
-- BARRA2 OPeNDAP path (active since Aug 2026) fetches hourly rsds (irradiance)
-  and tas (temperature) for the nearest ~11 km grid cell to the suburb centroid.
-  No NCI authentication needed — the NCI THREDDS server serves it publicly.
-  Data is cached under `data/raw/barra/{solar_irradiance,temperature_2m}/`.
-  Monthly stats and annual GHI are computed from the hourly values.
+- BARRA2 OPeNDAP path (active since Aug 2026) fetches hourly rsds (irradiance),
+  tas (temperature), and sfcWind (10 m wind speed) for the nearest ~11 km grid
+  cell to the suburb centroid. No NCI authentication needed — the NCI THREDDS
+  server serves it publicly.
+  Data is cached under `data/raw/barra/{solar_irradiance,temperature_2m,wind_speed_10m}/`.
+  Monthly stats and annual GHI are computed from the hourly values; mean wind
+  speed feeds Stage 3's wind-dependent `h_out`.
 - `--barra-csv` path ingests a pre-extracted hourly BARRA2 CSV (one row per
-  hour: `time_UTC, rsds_total_Wm2, temp_C`) — useful offline or for
-  grid cells extracted externally.
+  hour: `time_UTC, rsds_total_Wm2, temp_C`, optionally `wind_ms`) — useful
+  offline or for grid cells extracted externally. Wind is used when the
+  `wind_ms` column is present.
 - NASA POWER (fallback): samples a grid across the suburb bbox at 0.1° spacing
   and caches results under `data/raw/nasa_power/`. At ~50 km resolution, most
   Melbourne suburbs will return one or a few data points.
@@ -606,7 +658,9 @@ conclusions.
    (`--start-year 1990 --end-year 2020`).
 7. Stage 3 roof insulation `R_roof` is inferred per building from
    `building_type` / `roof_material` (no construction-age data exists), then
-   drives the heat-transfer fraction via `U/(U+h_out)`. COP and cooling
+   drives the heat-transfer fraction via `U/(U+h_out)`. `h_out` is now
+   wind-dependent (BARRA2 `sfcWind`, McAdams correlation) where BARRA2 is the
+   irradiance source, else the fixed 25 W/m²K fallback. COP and cooling
    fraction remain Melbourne defaults. No measured per-building insulation is
    available — the R_roof mapping is a documented proxy.
 8. **Stage 3 models cooling savings only — no heating penalty.** The seasonal
@@ -655,6 +709,9 @@ Ranked by impact on the defensibility of the final FYP numbers.
 
 ### Done
 
+- Wind-dependent `h_out` in Stage 3 (BARRA2 `sfcWind`, McAdams correlation) —
+  Aug 2026. Falls back to the fixed 25 W/m²K constant when BARRA2 wind data
+  isn't the irradiance source.
 - BARRA2 OPeNDAP is live (no NCI auth needed) — Aug 2026.
 - HSV classifier validated against Gemini (507 buildings, both suburbs) —
   Aug 2026. Agreement rates documented in Known Limitations.
@@ -672,7 +729,7 @@ Ranked by impact on the defensibility of the final FYP numbers.
 | Pre-fetched tiles | Team Google Drive ("Raising Rooves - Shared Data") | Clayton 670 MB, Carlton 386 MB zips |
 | Building footprints | OpenStreetMap Overpass API | Active but can fail/reject large queries |
 | Local footprint index | GeoPackage built by `tools.build_footprint_index` | Active when present |
-| Footprint supplement | VicMap BUILDING_POLYGON or Overture/Microsoft-style data | Manual download/build |
+| Footprint supplement | Overture Maps (public S3, `pip install overturemaps`) or VicMap BUILDING_POLYGON | Active — no key/auth needed; build with `tools.build_footprint_index` |
 | Solar irradiance (primary) | BARRA2 via NCI THREDDS/OPeNDAP | **Active; no auth needed** (Aug 2026 discovery) |
 | Solar irradiance (CSV) | Pre-extracted hourly BARRA2 CSV via `--barra-csv` | Active for offline runs |
 | Solar irradiance (auto) | NASA POWER REST API | No key needed; auto-fetched; cached under `data/raw/nasa_power/` |

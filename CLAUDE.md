@@ -206,6 +206,16 @@ Update `README.md` when:
 
 Do not update `README.md` for internal-only refactors or comment cleanup.
 
+## Reporting Basis
+
+When producing any report, comparison, or artifact from the pipeline outputs, lead
+with **per-building** and **per-m² of roof** figures (e.g.
+`electricity_saved_kwh_yr / roof_surface_area_m2`). Suburb-wide totals (GWh/yr,
+t CO2/yr, equivalent households) are supporting context only, never the headline —
+they mostly track study-bbox size and OSM footprint count, not whether a cool roof
+is worthwhile. Cross-suburb comparisons must be normalised per m² / per building.
+See DECISION_LOG.md 2026-08-28.
+
 ## Research Workflow
 
 When Ryan asks to research a topic:

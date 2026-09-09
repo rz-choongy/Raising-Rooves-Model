@@ -5,6 +5,7 @@ Covers:
 - Zero saving when absorbed energy is zero (already cool roof in Stage 2)
 - R_roof inference from building attributes (commercial, residential, metal, default)
 - Heat-transfer fraction derived from R_roof via U/(U+h_out), and its monotonicity
+- Wind-dependent h_out (McAdams correlation) and its fallback when wind is None
 - Correct COP adjustment for commercial buildings
 - Multistorey attenuation for tall (4+ storey) buildings
 - Output columns all present
@@ -16,12 +17,16 @@ import pytest
 
 from stage3_thermal.thermal_calculator import (
     COOLING_FRACTION,
+    H_OUT_WIND_INTERCEPT_W_M2K,
+    H_OUT_WIND_SLOPE_W_M2K_PER_MS,
+    H_OUTSIDE_W_M2K,
     HVAC_COP_COMMERCIAL,
     HVAC_COP_RESIDENTIAL,
     MULTISTOREY_ATTENUATION,
     R_ROOF_BY_CATEGORY,
     R_ROOF_DEFAULT,
     R_ROOF_METAL_RESIDENTIAL,
+    _h_out_from_wind,
     _heat_fraction_from_r_roof,
     _normalize_label,
     _r_roof_for_building,
@@ -31,6 +36,7 @@ from stage3_thermal.thermal_calculator import (
 
 EXPECTED_KEYS = {
     "roof_r_value_m2k",
+    "h_out_w_m2k",
     "heat_transfer_fraction",
     "heat_to_interior_kwh_yr",
     "cooling_load_reduction_kwh_yr",
@@ -131,6 +137,51 @@ class TestHeatFractionFromRRoof:
     def test_zero_or_negative_r_roof_uses_default(self):
         assert _heat_fraction_from_r_roof(0.0) == pytest.approx(_DEFAULT_FRACTION)
         assert _heat_fraction_from_r_roof(-1.0) == pytest.approx(_DEFAULT_FRACTION)
+
+
+class TestWindDependentHOut:
+    def test_none_wind_uses_fixed_fallback(self):
+        """No wind data → h_out reproduces the pre-wind-model fixed constant exactly."""
+        assert _h_out_from_wind(None) == pytest.approx(H_OUTSIDE_W_M2K)
+
+    def test_nan_wind_uses_fixed_fallback(self):
+        assert _h_out_from_wind(float("nan")) == pytest.approx(H_OUTSIDE_W_M2K)
+
+    def test_zero_wind_uses_intercept_only(self):
+        assert _h_out_from_wind(0.0) == pytest.approx(H_OUT_WIND_INTERCEPT_W_M2K)
+
+    def test_wind_arithmetic(self):
+        v = 4.0
+        expected = H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * v
+        assert _h_out_from_wind(v) == pytest.approx(expected)
+
+    def test_negative_wind_clamped_to_zero(self):
+        """Defensive: a bad negative wind reading shouldn't lower h_out below the intercept."""
+        assert _h_out_from_wind(-2.0) == pytest.approx(H_OUT_WIND_INTERCEPT_W_M2K)
+
+    def test_higher_wind_increases_h_out(self):
+        assert _h_out_from_wind(1.0) < _h_out_from_wind(5.0) < _h_out_from_wind(10.0)
+
+    def test_default_call_omits_wind_reproduces_legacy_behaviour(self):
+        """calculate_thermal_benefit() with no wind_speed_ms arg must be unchanged
+        from before wind support was added (default parameter value is None)."""
+        result = calculate_thermal_benefit(energy_saved_kwh_yr=1000.0)
+        assert result["h_out_w_m2k"] == pytest.approx(H_OUTSIDE_W_M2K)
+        assert result["heat_transfer_fraction"] == pytest.approx(_DEFAULT_FRACTION, abs=0.0005)
+
+
+class TestWindMonotonicityEndToEnd:
+    def test_more_wind_means_less_heat_reaches_interior(self):
+        """
+        More wind -> higher h_out -> the roof sheds absorbed heat back outside more
+        efficiently -> a SMALLER fraction conducts inward -> less cooling benefit.
+        Holding R_roof fixed isolates the wind effect.
+        """
+        calm = calculate_thermal_benefit(1000.0, wind_speed_ms=0.5)
+        windy = calculate_thermal_benefit(1000.0, wind_speed_ms=10.0)
+        assert windy["h_out_w_m2k"] > calm["h_out_w_m2k"]
+        assert windy["heat_transfer_fraction"] < calm["heat_transfer_fraction"]
+        assert windy["electricity_saved_kwh_yr"] < calm["electricity_saved_kwh_yr"]
 
 
 class TestResidentialPhysics:

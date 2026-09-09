@@ -342,3 +342,86 @@ implying a DSM follow-up that no longer exists.
 `tests/test_stage1_attribution.py`, `tests/test_gemini_osm_experiment.py`. Deleted:
 `stage1_segmentation/dsm_processor.py`, `stage1_segmentation/pitch_extractor.py`,
 `tools/extract_pitch.py`, `tests/test_extract_pitch_import.py`.
+
+---
+
+## 2026-08-27 — Stage 3 h_out: wind-dependent via BARRA2 sfcWind
+
+**Decision:** Replaced the fixed outdoor surface coefficient `H_OUTSIDE_W_M2K = 25.0`
+with a wind-dependent value where BARRA2 is the irradiance source:
+`h_out = H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * wind_speed_ms`
+(McAdams 1954 simple forced-convection correlation for an exterior building surface;
+5.7 + 3.8·V, the same form used by EnergyPlus's "SimpleCombined" exterior convection
+algorithm). BARRA2's `sfcWind` (10 m wind speed) is now fetched alongside `rsds`/`tas`
+in `fetch_all_climate_data()`, reduced to a suburb-level annual mean in
+`wind_processor.py`, carried through Stage 2 as `mean_wind_speed_ms`, and consumed by
+`thermal_calculator._h_out_from_wind()`. `H_OUTSIDE_W_M2K` remains as the fallback for
+runs where BARRA2 isn't the irradiance source (NASA POWER / user CSV / Melbourne
+default carry no wind data) — this reproduces pre-change results exactly for those
+paths, and `calculate_thermal_benefit()` reproduces its pre-change output exactly when
+`wind_speed_ms` is omitted (verified in `TestWindDependentHOut::
+test_default_call_omits_wind_reproduces_legacy_behaviour`).
+
+**Why:** Ryan asked whether the heat-ingress model accounts for wind — it didn't. Physically,
+`h_out` is described in the code as "combined convective + radiative," and convective
+transfer at a roof surface is genuinely wind-speed-dependent; the fixed 25 W/m²K value
+is literally ISO 6946's standard external surface coefficient (Rse = 0.04 m²K/W), a
+building-code default not derived from local Melbourne conditions. BARRA2 already
+serves `sfcWind` in the same catalog structure as `rsds`/`tas` (confirmed against the
+live THREDDS catalog), so wiring it in costs one more monthly OPeNDAP fetch per suburb
+with no new data source.
+
+**Direction check:** more wind → higher h_out → the roof sheds absorbed heat back to
+outside air more efficiently → a *smaller* fraction of the Stage 2 absorbed-solar delta
+conducts inward → *less* cooling benefit, all else equal. Confirmed end-to-end in
+`TestWindMonotonicityEndToEnd`.
+
+**Tradeoffs:** The McAdams correlation is a generic building-simulation default, not
+re-validated for Australian roof geometries or BARRA2's ~11 km wind resolution — same
+unvalidated-constant caveat that already applies to `H_OUTSIDE`, `COOLING_FRACTION`,
+`HEATING_FRACTION`, and the R_roof proxy table (roadmap item 2). Wind speed, like GHI,
+is applied suburb-uniformly (one BARRA2 grid cell per suburb) — no per-building wind
+exposure (tree cover, terrain shielding, building height) is modelled.
+
+**Rejected:**
+- *uas/vas component vectors* — BARRA2 also serves the eastward/northward wind
+  components separately; `sfcWind` is the already-resolved speed and is what the
+  McAdams correlation needs, so no vector math was necessary.
+- *McAdams' own high-wind power-law variant* (h = 6.47·V^0.78, for V > 5 m/s) — skipped
+  for now since BARRA2 annual-mean wind speeds at Melbourne suburb centroids sit well
+  under 5 m/s; worth revisiting if a windier/coastal suburb is added.
+
+**Code/docs affected:** `config/settings.py`, `stage2_irradiance/wind_processor.py`
+(new), `stage2_irradiance/barra_client.py`, `stage2_irradiance/pipeline.py`,
+`stage3_thermal/thermal_calculator.py`, `stage3_thermal/pipeline.py`,
+`tests/test_stage3_thermal.py`, `README.md`.
+
+**Follow-up:** re-run Stage 2/3 for existing suburbs (Clayton, Carlton) to pick up
+`mean_wind_speed_ms` and the wind-adjusted `h_out_w_m2k`/`electricity_saved_kwh_yr`,
+and refresh the published comparison artifact if the numbers move materially.
+
+---
+
+## 2026-08-28 — Reporting basis: per-building and per-m², not suburb totals
+
+**Decision:** Any report or comparison artifact we produce from the pipeline outputs
+must lead with **per-building** and **per-m² of roof** figures. Suburb-wide totals
+(GWh/yr, t CO2/yr, "equivalent households") may appear as supporting context but are
+not the headline. When comparing suburbs, normalise to `kWh/m2/yr` and
+`kWh/building/yr` so suburbs of different size and building count are actually
+comparable.
+
+**Why:** Ryan's call. Absolute suburb totals are dominated by how big the study
+bbox happens to be and how many footprints OSM has — Tullamarine "wins" every total
+purely because it has 10,632 roofs over 4.4 M m². That tells us nothing about
+whether a cool roof is worth doing on a given building. The per-m² number
+(`electricity_saved_kwh_yr / roof_surface_area_m2`) is the physically meaningful,
+size-independent quantity and is what the FYP argument should rest on.
+
+**How to apply:** stat tiles and comparison tables lead with per-m² / per-building;
+totals are a secondary row. `tools/compare_suburbs.py` output and the
+`suburb_comparison.csv` schema should carry `elec_per_m2_kwh_yr` and
+`elec_per_building_kwh_yr` as primary columns.
+
+**Code/docs affected:** future report tooling and artifacts only; no pipeline code
+change. `CLAUDE.md` "README Update Rules" area notes the reporting basis.

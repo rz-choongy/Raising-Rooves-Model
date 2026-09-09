@@ -149,6 +149,18 @@ def _classify_by_hsv(mean_h: float, mean_s: float, mean_v: float) -> tuple[RoofM
         else:
             return RoofMaterial.TERRACOTTA, RoofColour.BROWN, 0.55
 
+    # Orange hues (H: 30-50) → browner/more orange terracotta tiles.
+    # Added 2026-08-20: a Carlton "other/other" audit found tiles in this range
+    # falling through to the OTHER/OTHER default instead of being recognised as
+    # terracotta-adjacent (this range already had an absorptance floor in
+    # _hsv_to_absorptance but no label here). Needs a higher saturation floor than
+    # the 0-30 band: re-checking 107 flipped buildings against satellite imagery
+    # found every false positive (driveways, beige industrial roofs, corrugated
+    # sheds — not tile) at S<=0.226, and every confirmed genuine terracotta tile
+    # at S>=0.243. S>0.25 sits in that empirical gap.
+    if 30 <= mean_h < 50 and mean_s > 0.25:
+        return RoofMaterial.TERRACOTTA, RoofColour.BROWN, 0.55
+
     # Blue hues (H: 200-260) → colorbond blue
     if 200 < mean_h < 260 and mean_s > 0.15:
         return RoofMaterial.METAL_DARK, RoofColour.BLUE, 0.5
