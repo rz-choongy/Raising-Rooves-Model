@@ -223,11 +223,9 @@ def _assumed_pitch_deg(
     based on available building attributes.
 
     Priority: explicit roof_shape tag > multi-storey override > building_type lookup
-    > residential default. Default is 12° — calibrated against Gemini 2.5 Flash
-    validation on 507 Melbourne buildings (Clayton mean 5.7°, Carlton mean 3.7°).
-    The previous 22.5° default was a 3-6x overestimate. 12° is conservative: higher
-    than Gemini's nadir-biased estimates but much closer to modern low-pitch
-    Melbourne residential stock.
+    > residential default. Default is 22.5° for residential/generic "yes" buildings.
+    Gemini 2.5 Flash validation on 507 Melbourne buildings (Clayton mean 5.7°,
+    Carlton mean 3.7°) had previously calibrated this down to 12°; reverted per Ryan.
 
     We do not measure pitch from LiDAR/DSM — trialled and dropped, see
     DECISION_LOG.md 2026-08-17 (elevation data wasn't precise enough for
@@ -265,7 +263,7 @@ def _assumed_pitch_deg(
     _FLAT = 0.0
     _LOW = 5.0
     _SHALLOW = 10.0
-    _TYPICAL = 12.0
+    _TYPICAL = 22.5
     _STEEP = 22.5
 
     flat_types = {"commercial", "retail", "office", "shop", "supermarket", "hotel",
@@ -288,8 +286,7 @@ def _assumed_pitch_deg(
         if bt in steep_types:
             return _STEEP, basis
 
-    # Residential types and generic "yes" → modern Melbourne low-pitch
-    # Calibrated against Gemini validation (507 buildings, 2026-08-11).
+    # Residential types and generic "yes"
     return _TYPICAL, "residential_default"
 
 
