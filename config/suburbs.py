@@ -162,7 +162,7 @@ SUBURBS = {
         zone_type="residential",
     ),
     "traralgon": Suburb(
-        name="Latrobe Valley (Traralgon)",
+        name="Traralgon",
         sa2_code="213021422",
         centroid=(-38.1950, 146.5380),
         bbox=(-38.2130, 146.5080, -38.1770, 146.5680),

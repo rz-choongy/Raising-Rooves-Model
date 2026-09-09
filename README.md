@@ -130,13 +130,36 @@ data/output/stage3_{suburb}_report.html
 ### Strongly Recommended
 
 - Local footprint index:
-  `data/raw/footprints/buildings_index.gpkg` (~540 MB, built locally — see below)
+  `data/raw/footprints/buildings_index.gpkg` (~250 MB, built locally — see below)
 - Source footprint file for rebuilding the index:
-  `data/raw/footprints/melbourne_overture.geojsonl` (~1 GB). This is a
-  line-delimited GeoJSON export of Overture Maps / Microsoft AU building
-  footprints for the Melbourne area. It is too large for git — ask a teammate
-  for a copy (or the built `.gpkg` directly), then build the index once with:
+  `data/raw/footprints/melbourne_overture.geojsonl` (~650 MB for the Greater
+  Melbourne bbox). This is a line-delimited GeoJSON export of Overture Maps
+  building footprints (Microsoft ML Buildings dataset) for the Melbourne area.
+  It is too large for git and is not built by default.
+
+  Fetch it directly from Overture Maps' public dataset (no API key, no
+  teammate hand-off needed — Overture publishes to a public, unsigned S3
+  bucket):
+
+  ```bash
+  pip install overturemaps
+  python -m overturemaps download \
+    --bbox=144.8110,-38.1590,145.2350,-37.6310 \
+    -f geojsonseq -t building \
+    -o data/raw/footprints/melbourne_overture.geojsonl
+  ```
+
+  The bbox above covers all Greater Melbourne suburbs in `config/suburbs.py`
+  (excludes the regional Victoria suburbs, which would pull in a much larger,
+  mostly-empty area). Adjust it if you add suburbs outside that box. This
+  pulled ~980k buildings in under a minute on a normal connection.
+
+  Then build the spatial index once:
   `python -m tools.build_footprint_index`
+
+  (Alternative source, if you'd rather not install `overturemaps`: ask a
+  teammate for a copy of `melbourne_overture.geojsonl` or the built `.gpkg`
+  directly.)
 - Real irradiance CSV with columns:
   `lat, lon, annual_ghi_kwh_m2`
 - True suburb boundary polygon for final reporting. The current config uses
@@ -706,7 +729,7 @@ Ranked by impact on the defensibility of the final FYP numbers.
 | Pre-fetched tiles | Team Google Drive ("Raising Rooves - Shared Data") | Clayton 670 MB, Carlton 386 MB zips |
 | Building footprints | OpenStreetMap Overpass API | Active but can fail/reject large queries |
 | Local footprint index | GeoPackage built by `tools.build_footprint_index` | Active when present |
-| Footprint supplement | VicMap BUILDING_POLYGON or Overture/Microsoft-style data | Manual download/build |
+| Footprint supplement | Overture Maps (public S3, `pip install overturemaps`) or VicMap BUILDING_POLYGON | Active — no key/auth needed; build with `tools.build_footprint_index` |
 | Solar irradiance (primary) | BARRA2 via NCI THREDDS/OPeNDAP | **Active; no auth needed** (Aug 2026 discovery) |
 | Solar irradiance (CSV) | Pre-extracted hourly BARRA2 CSV via `--barra-csv` | Active for offline runs |
 | Solar irradiance (auto) | NASA POWER REST API | No key needed; auto-fetched; cached under `data/raw/nasa_power/` |

@@ -67,10 +67,11 @@ def build_index(source: Path, output: Path, chunk_size: int = 50_000) -> None:
     if not source.exists():
         raise FileNotFoundError(
             f"Source file not found: {source}\n"
-            "Download from:\n"
-            "  Overture Maps (Melbourne): https://overturemaps.org/\n"
-            "  Microsoft AU Building Footprints: "
-            "https://github.com/microsoft/AustraliaBuildingFootprints"
+            "Fetch it from Overture Maps' public S3 bucket (no key needed):\n"
+            "  pip install overturemaps\n"
+            "  python -m overturemaps download --bbox=144.8110,-38.1590,145.2350,-37.6310 \\\n"
+            "    -f geojsonseq -t building -o data/raw/footprints/melbourne_overture.geojsonl\n"
+            "See README.md 'Data Needed' for details."
         )
 
     output.parent.mkdir(parents=True, exist_ok=True)

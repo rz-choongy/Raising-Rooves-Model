@@ -7,18 +7,18 @@ a clear message on failure.
 
 import os
 
-from config.settings import MELBOURNE_BBOX
+from config.settings import VICTORIA_BBOX
 
 
 def validate_bbox(bbox: tuple[float, float, float, float]) -> bool:
     """
-    Check that a bounding box is valid and within the greater Melbourne area.
+    Check that a bounding box is valid and within Victoria (incl. regional centres).
 
     Args:
         bbox: (south, west, north, east) in EPSG:4326.
 
     Raises:
-        ValueError: If bbox is malformed or outside Melbourne.
+        ValueError: If bbox is malformed or outside Victoria.
     """
     if len(bbox) != 4:
         raise ValueError(f"Bounding box must have 4 values (south, west, north, east), got {len(bbox)}")
@@ -29,13 +29,13 @@ def validate_bbox(bbox: tuple[float, float, float, float]) -> bool:
     if west >= east:
         raise ValueError(f"West ({west}) must be less than east ({east})")
 
-    # Check within greater Melbourne bounds (with margin)
-    mel_south, mel_west, mel_north, mel_east = MELBOURNE_BBOX
+    # Check within Victoria state bounds (with margin)
+    vic_south, vic_west, vic_north, vic_east = VICTORIA_BBOX
     margin = 0.5  # degrees
-    if south < mel_south - margin or north > mel_north + margin:
-        raise ValueError(f"Latitude ({south}, {north}) outside Melbourne range")
-    if west < mel_west - margin or east > mel_east + margin:
-        raise ValueError(f"Longitude ({west}, {east}) outside Melbourne range")
+    if south < vic_south - margin or north > vic_north + margin:
+        raise ValueError(f"Latitude ({south}, {north}) outside Victoria range")
+    if west < vic_west - margin or east > vic_east + margin:
+        raise ValueError(f"Longitude ({west}, {east}) outside Victoria range")
 
     return True
 
