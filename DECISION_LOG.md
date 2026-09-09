@@ -399,3 +399,29 @@ exposure (tree cover, terrain shielding, building height) is modelled.
 **Follow-up:** re-run Stage 2/3 for existing suburbs (Clayton, Carlton) to pick up
 `mean_wind_speed_ms` and the wind-adjusted `h_out_w_m2k`/`electricity_saved_kwh_yr`,
 and refresh the published comparison artifact if the numbers move materially.
+
+---
+
+## 2026-08-28 — Reporting basis: per-building and per-m², not suburb totals
+
+**Decision:** Any report or comparison artifact we produce from the pipeline outputs
+must lead with **per-building** and **per-m² of roof** figures. Suburb-wide totals
+(GWh/yr, t CO2/yr, "equivalent households") may appear as supporting context but are
+not the headline. When comparing suburbs, normalise to `kWh/m2/yr` and
+`kWh/building/yr` so suburbs of different size and building count are actually
+comparable.
+
+**Why:** Ryan's call. Absolute suburb totals are dominated by how big the study
+bbox happens to be and how many footprints OSM has — Tullamarine "wins" every total
+purely because it has 10,632 roofs over 4.4 M m². That tells us nothing about
+whether a cool roof is worth doing on a given building. The per-m² number
+(`electricity_saved_kwh_yr / roof_surface_area_m2`) is the physically meaningful,
+size-independent quantity and is what the FYP argument should rest on.
+
+**How to apply:** stat tiles and comparison tables lead with per-m² / per-building;
+totals are a secondary row. `tools/compare_suburbs.py` output and the
+`suburb_comparison.csv` schema should carry `elec_per_m2_kwh_yr` and
+`elec_per_building_kwh_yr` as primary columns.
+
+**Code/docs affected:** future report tooling and artifacts only; no pipeline code
+change. `CLAUDE.md` "README Update Rules" area notes the reporting basis.
