@@ -16,9 +16,16 @@ google-genai>=1.0
 # Climate data (BARRA2 via NCI THREDDS/OPeNDAP; public access, no NCI auth needed as of Aug 2026)
 xarray>=2024.1
 netCDF4>=1.6
+# pydap: pure-Python OPeNDAP backend for xarray (single-point BARRA2 extracts;
+# used by tools.fetch_heat_ingress_weather when the netCDF4 wheel lacks DAP).
+pydap>=3.4
 
 # Data storage
 pyarrow>=14.0
+
+# Stage 3 transient heat-ingress model — optional JIT accelerator for the
+# per-building time-marching loop (~20x). Falls back to vectorised NumPy if absent.
+numba>=0.59
 
 # Optional: fetch the Overture Maps footprint supplement (tools.build_footprint_index)
 # overturemaps>=1.0

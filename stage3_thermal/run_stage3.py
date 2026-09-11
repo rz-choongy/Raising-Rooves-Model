@@ -1,32 +1,35 @@
 """
-CLI entry point for Stage 3: Thermal Electricity Savings.
+CLI entry point for Stage 3: Transient Roof Heat-Ingress.
 
-Converts the absorbed solar reduction from Stage 2 (energy_saved_kwh_yr) into
-realistic cooling electricity savings using building thermal physics.
+Runs a transient 1-D finite-volume conduction model through a layered roof for
+every building in a suburb, at the building's current solar absorptance and at
+the cool-roof target, and reports the cooling-season electricity saving and the
+winter heating penalty.
 
 Usage:
     python -m stage3_thermal.run_stage3 --suburb Carlton
-    python -m stage3_thermal.run_stage3 --suburb Carlton --debug
+    python -m stage3_thermal.run_stage3 --suburb Carlton --year 2007 --debug
+    python -m stage3_thermal.run_stage3 --suburb Carlton --weather-csv path/to/hourly.csv
     python -m stage3_thermal.run_stage3 --list-suburbs
 
 Prerequisites:
     Stage 2 output must exist for the suburb:
         data/output/stage2_{suburb}.parquet
 
+    Hourly weather is auto-resolved: --weather-csv → cached
+    data/raw/barra/heat_ingress_{suburb}_{year}.csv → BARRA2 OPeNDAP fetch
+    (needs xarray + pydap + network) → committed data/samples fallback.
+
 Output files:
     data/output/stage3_{suburb}.parquet
     data/output/stage3_{suburb}.csv
-
-Added columns (on top of all Stage 2 columns):
-    heat_to_interior_kwh_yr       — roof heat conducted to the building interior
-    cooling_load_reduction_kwh_yr — portion that drives active cooling demand
-    electricity_saved_kwh_yr      — electricity saving from reduced AC load
-    co2_electricity_saved_kg_yr   — CO2 avoided from the electricity saving
 """
 
 import argparse
 import sys
+from pathlib import Path
 
+from config.settings import HEAT_INGRESS_REFERENCE_YEAR
 from config.suburbs import list_suburbs
 from shared.logging_config import setup_logging
 from stage3_thermal.pipeline import run_stage3
@@ -34,12 +37,24 @@ from stage3_thermal.pipeline import run_stage3
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Raising Rooves — Stage 3: Thermal Electricity Savings"
+        description="Raising Rooves — Stage 3: Transient Roof Heat-Ingress"
     )
     parser.add_argument(
         "--suburb",
         type=str,
         help="Name of the Melbourne suburb to process (e.g. 'Carlton')",
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        default=HEAT_INGRESS_REFERENCE_YEAR,
+        help=f"BARRA2 reference year for the hourly weather (default {HEAT_INGRESS_REFERENCE_YEAR})",
+    )
+    parser.add_argument(
+        "--weather-csv",
+        type=str,
+        default=None,
+        help="Explicit hourly BARRA2 weather CSV (overrides auto-resolution)",
     )
     parser.add_argument(
         "--debug",
@@ -68,19 +83,23 @@ def main() -> None:
     logger.info("Starting Stage 3 for suburb: %s", args.suburb)
 
     try:
-        df = run_stage3(suburb_name=args.suburb)
+        df = run_stage3(
+            suburb_name=args.suburb,
+            weather_csv=Path(args.weather_csv) if args.weather_csv else None,
+            year=args.year,
+        )
         if df.empty:
             logger.warning("No results produced. Check logs for details.")
             sys.exit(1)
 
         total_elec = df["electricity_saved_kwh_yr"].sum()
+        total_net = df["net_electricity_saved_kwh_yr"].sum()
         total_co2 = df["co2_electricity_saved_kg_yr"].sum()
-        total_absorbed = df["energy_saved_kwh_yr"].sum()
-        ratio = (total_elec / total_absorbed * 100) if total_absorbed > 0 else 0.0
 
         logger.info(
-            "Done. %d buildings | %.0f kWh/yr electricity saved (%.1f%% of absorbed solar) | %.0f kg CO2/yr avoided.",
-            len(df), total_elec, ratio, total_co2,
+            "Done. %d buildings | %.0f kWh/yr cooling electricity saved | "
+            "%.0f kWh/yr net of heating penalty | %.0f kg CO2/yr avoided.",
+            len(df), total_elec, total_net, total_co2,
         )
     except Exception as e:
         logger.error("Pipeline failed: %s", e, exc_info=True)

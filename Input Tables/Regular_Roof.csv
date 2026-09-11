@@ -1,0 +1,5 @@
+﻿Material_type ,Thickness_m,Density_Kg_m3,Spec_Heat_Cap_J_KgK,R_value_m2K_W
+Steel,0.00042,7800,480,0.0000084
+Insulation,0.164,12,840,4.1
+Cavity,0.3,1.225,1000,0.333
+Plaster,0.013,950,840,0.08125

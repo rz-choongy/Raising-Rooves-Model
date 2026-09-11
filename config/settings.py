@@ -78,6 +78,13 @@ BARRA2_VARIABLES = {
     # sfcWind = near-surface (10 m) wind speed (m/s). Confirmed present in the
     # AUS-11 BARRA-R2 1hr catalog alongside rsds/tas (same file-per-month layout).
     "wind_speed_10m": "sfcWind",
+    # rsdsdir = surface direct downwelling shortwave radiation flux (W/m²).
+    # Diffuse is derived as rsds - rsdsdir (there is no rsdsdif file on THREDDS).
+    # Used by the standalone heat-ingress weather extract (tools.fetch_heat_ingress_weather).
+    "solar_irradiance_direct": "rsdsdir",
+    # hurs = near-surface relative humidity (%). Used by the heat-ingress model
+    # for the sky-temperature (dew-point) term.
+    "relative_humidity_2m": "hurs",
 }
 
 # ── Melbourne Defaults ───────────────────────────────────────────────────────
@@ -135,58 +142,56 @@ MELBOURNE_DEFAULT_GHI_KWH_M2_YR = 1850.0
 
 # ── Stage 3 Thermal Physics ───────────────────────────────────────────────────
 # Centralised here so sensitivity analysis can vary them without editing source.
+#
+# Stage 3 runs a transient 1-D finite-volume heat-ingress model through a layered
+# roof for every building (stage3_thermal/heat_ingress_model.py, ported from
+# heat_ingress_model.ipynb). The per-building cool-roof saving is the difference
+# between marching that model at the building's current solar absorptance and at
+# COOL_ROOF_ABSORPTANCE. This replaced the earlier inferred-R_roof algebraic
+# calculator (see DECISION_LOG 2026-09-10).
 
-# Fraction of the absorbed-solar delta (Stage 2 cool roof benefit) that conducts
-# to the interior is derived PER BUILDING from its roof insulation, following the
-# roof-only heat-ingress framing in Maggie's model (roof-only-heat-ingress-model):
-#   U_roof   = 1 / R_roof                       (W/m²K)
-#   fraction = U_roof / (U_roof + H_OUTSIDE)    (unitless)
-# H_OUTSIDE is the combined convective + radiative outdoor surface coefficient.
-# Worked values:  R0.5 → 0.074,  R2.5 → 0.0155,  R3.2 → 0.012.
-# The R2.5 default reproduces the previous single 0.016 constant, so well-insulated
-# stock is unchanged while poorly-insulated stock now correctly shows more benefit.
-# Produces ~200–600 kWh/yr for a typical Melbourne house, consistent with CSIRO
-# "Cool Roofs for Australian Homes" (2012).
-# TODO: validate against Stuart's NatHERS runs or AS/NZS 4859.1 simulation.
-#
-# H_OUTSIDE_W_M2K is now the FALLBACK value used when no local wind speed is
-# available (e.g. NASA POWER / Melbourne-default irradiance paths, which carry
-# no BARRA2 wind data). It equals the ISO 6946 standard external surface
-# coefficient (Rse = 0.04 m²K/W) — a fixed, wind-independent building-code
-# default, not a Melbourne-specific measurement.
-#
-# When BARRA2 wind data IS available, h_out is instead computed per suburb
-# from the local mean wind speed via the McAdams (1954) simple forced-
-# convection correlation for an exterior building surface — widely used in
-# building energy simulation (e.g. EnergyPlus's "SimpleCombined" exterior
-# convection algorithm):
-#   h_out = H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * V
-# Valid roughly over the 0–5 m/s range McAdams fit (typical suburban 10 m
-# wind); not re-validated here for Australian roof geometries specifically.
-# TODO: validate against Stuart's NatHERS runs or AS/NZS 4859.1 simulation.
-H_OUTSIDE_W_M2K = 25.0
+# BARRA2 reference year for the hourly weather the model marches over.
+HEAT_INGRESS_REFERENCE_YEAR = 2007
+
+# Fixed reference indoor temperature (°C). The model holds the interior at this
+# setpoint (no floating dead-band yet).
+HEAT_INGRESS_INDOOR_SETPOINT_C = 20.0
+
+# Long-wave emissivity of the outer roof surface (Stephan-Boltzmann sky exchange).
+HEAT_INGRESS_ROOF_EMISSIVITY = 0.9
+
+# Internal-surface convection coefficient (W/m²K) between the ceiling and indoor
+# air used by the transient march (notebook `hi`).
+HEAT_INGRESS_INTERNAL_H_W_M2K = 3.0
+
+# Roof height above ground (m) for the wind-speed height correction. Stage 1 has
+# no reliable per-building height, so this is a fixed suburban assumption.
+HEAT_INGRESS_ROOF_HEIGHT_M = 6.0
+
+# Nominal forward-Euler solver timestep (s). Clamped down at run time if the
+# stability limit over the actual weather series is tighter (cavity-layer bound).
+HEAT_INGRESS_SOLVER_DT_S = 40
+
+# Hours of simulation discarded as thermal spin-up before results are integrated.
+HEAT_INGRESS_SPINUP_HOURS = 48
+
+# Layered roof construction the model marches heat through. One stack for every
+# building (steel deck / bulk insulation / ceiling cavity / plaster). Committed
+# to the repo so a clone runs Stage 3 offline.
+ROOF_LAYERS_CSV = PROJECT_ROOT / "Input Tables" / "Regular_Roof.csv"
+
+# Outdoor surface film coefficient h_ext is computed hour-to-hour from the local
+# BARRA2 wind speed via the McAdams (1954) simple forced-convection correlation
+# for an exterior building surface (also EnergyPlus "SimpleCombined"):
+#   h_ext = H_OUT_WIND_INTERCEPT_W_M2K + H_OUT_WIND_SLOPE_W_M2K_PER_MS * V_local
+# V_local is the 10 m BARRA2 wind speed brought to roof height (EnergyPlus Eq. 3.84).
 H_OUT_WIND_INTERCEPT_W_M2K = 5.7
 H_OUT_WIND_SLOPE_W_M2K_PER_MS = 3.8
 
-# Per-building roof thermal resistance R_roof (m²·K/W). Stage 1 gives us no
-# construction-age field, so R_roof is inferred from the attributes we do have
-# (building_type, levels, roof_material). This is a documented assumption for
-# sensitivity analysis, NOT a measured value — see README known limitations.
-R_ROOF_DEFAULT = 2.5  # unknown / missing attributes → assume modern insulated stock
-
-R_ROOF_BY_CATEGORY: dict[str, float] = {
-    "commercial":  1.5,  # metal deck, variable insulation
-    "residential": 2.5,  # modern detached/low-rise default
-}
-
-# Metal-roofed residential stock skews older/less-insulated — nudge R_roof down
-# one step. Weak proxy (material, not age); documented as an assumption.
-R_ROOF_METAL_RESIDENTIAL = 1.5
-
-# Extra attenuation multiplier for 4+ storey buildings — greater thermal mass and
-# multiple floor slabs further reduce the roof-to-occupant heat path, on top of
-# the R_roof fraction.
-MULTISTOREY_ATTENUATION = 0.5
+# ISO 6946 still-air external surface coefficient (W/m²K). No longer used by the
+# Stage 3 pipeline (the transient model derives h_ext from hourly wind) — kept
+# for tools/seasonal_analysis.py, which sweeps an algebraic U/(U+h_out) fraction.
+H_OUTSIDE_W_M2K = 25.0
 
 # Fraction of interior heat gain from the roof that drives active cooling demand.
 # The remainder is offset by natural ventilation, thermal mass buffering, or night
