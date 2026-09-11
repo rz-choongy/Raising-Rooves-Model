@@ -52,10 +52,15 @@ benefits of cool roof interventions across Melbourne suburbs.
   Irradiance priority: BARRA2 OPeNDAP (live since Aug 2026 — no NCI auth
   needed) → BARRA2 hourly CSV (`--barra-csv`) → user CSV → NASA POWER →
   Melbourne default. Output carries an `irradiance_source` column.
-- Stage 3 thermal modelling: per-building R_roof inferred from building
-  attributes → heat-transfer fraction `U/(U+h_out)` → cooling load →
-  electricity saved → CO2. See `DECISION_LOG.md` for the design rationale.
-  Cooling-only: heating penalty not wired in yet.
+- Stage 3 thermal modelling: per-building **transient 1-D finite-volume**
+  heat-ingress model (`stage3_thermal/heat_ingress_model.py`, vectorised port
+  of `heat_ingress_model.ipynb`). Marches a layered roof at current vs cool
+  absorptance over a full BARRA2 year; reports cooling-season electricity
+  saved AND the winter heating penalty separately. Replaced the inferred
+  `R_roof` calculator 2026-09-10 (`thermal_calculator.py` deleted). Hourly
+  weather via `tools.fetch_heat_ingress_weather` (cached under
+  `data/raw/barra/`), offline fallback `data/samples/heat_ingress_carlton_2007.csv`.
+  See `DECISION_LOG.md`.
 - Gemini validation database: 507 buildings (Clayton 302, Carlton 205)
   stored at `data/output/experiments/`. Resume-safe, no repeat API cost.
 - Seasonal analysis tool (`tools.seasonal_analysis`): monthly cooling
@@ -80,12 +85,13 @@ benefits of cool roof interventions across Melbourne suburbs.
 
 ### Next Priorities (ranked — keep in sync with README Roadmap)
 
-1. Add the heating penalty to Stage 3 (wire `HEATING_FRACTION` into
-   `thermal_calculator.py` with CDD/HDD-driven monthly split). The seasonal
-   analysis proved it matches the cooling benefit in magnitude.
-2. Validate Stage 3 constants (`H_OUTSIDE`, `COOLING_FRACTION`,
-   `HEATING_FRACTION`, COP, R_roof proxy table) against Stuart's NatHERS
-   runs / AS-NZS 4859.1, and publish a sensitivity analysis.
+1. Validate the Stage 3 transient model inputs against Stuart's NatHERS runs /
+   AS-NZS 4859.1: the single `Regular_Roof.csv` layer stack, the 18°C
+   cooling/heating hour split, `COOLING_FRACTION`/`HEATING_FRACTION` (0.70),
+   `T_sky = T_out - 10 K`, one COP for cooling and heating. Publish a
+   sensitivity analysis (constants in `config/settings.py`).
+2. Map `roof_material` to distinct per-building roof layer stacks (metal deck /
+   tile-on-batten / default) instead of one stack for every building.
 3. Replace rectangular bboxes with true ABS SA2 suburb polygons and an
    `inside_suburb` flag; report in-boundary totals.
 4. Filter non-building footprints from Stage 1 (Gemini found 24% of Clayton
@@ -175,6 +181,7 @@ Use this as the quick checklist when Ryan asks "what APIs/data do we use?"
 | Building footprints supplement | VicMap BUILDING_POLYGON | Manual SHP download from DataShare | Optional merge |
 | Irradiance (active) | BARRA2 via NCI THREDDS/OPeNDAP | No key needed (public OPeNDAP) | Active Stage 2 source |
 | Irradiance (fallback) | NASA POWER REST API | No key; cached under `data/raw/nasa_power/` | Fallback Stage 2 source |
+| Hourly weather (Stage 3) | BARRA2 OPeNDAP via `tools.fetch_heat_ingress_weather` (`rsds`, `rsdsdir`, `tas`, `hurs`, `sfcWind`) | No key; needs `xarray`+`pydap`; cached under `data/raw/barra/` | Transient heat-ingress model forcing |
 | Suburb boundaries | ABS SA2 shapefiles / manual bbox | Manual data prep | Needed for robust coverage |
 
 DSM/LiDAR pitch sources (ELVIS 1 m, City of Melbourne Open Data, OpenTopography
@@ -191,8 +198,12 @@ Quick reference:
 
 - **Stage 1:** OSM + VicMap footprints, HSV pixel classifier. `energy_saved_kwh_yr`
   is absorbed solar reduction — NOT electricity savings. Stage 3 handles that.
-- **Stage 3:** R_roof inferred per building. Constants in `config/settings.py`
-  are unvalidated Melbourne defaults — the #1 roadmap item.
+- **Stage 3:** per-building transient finite-volume roof model
+  (`stage3_thermal/heat_ingress_model.py`). Marches `Regular_Roof.csv` layers at
+  current vs cool absorptance over a full hourly BARRA2 year; splits the delta
+  by 18°C outdoor temp into cooling saving vs heating penalty. Constants in
+  `config/settings.py` (`HEAT_INGRESS_*`, `COOLING_FRACTION`, COP) are
+  unvalidated Melbourne defaults — the #1 roadmap item.
 
 ## README Update Rules
 

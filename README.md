@@ -22,6 +22,8 @@ cp data/samples/stage1_carlton.parquet data/output/
 
 # Irradiance comes from NASA POWER automatically (free, no key)
 python -m stage2_irradiance.run_stage2 --suburb Carlton
+# Stage 3 uses the committed hourly-weather sample when a live BARRA2 fetch
+# isn't possible; ~5-10 min for the transient model over all buildings
 python -m stage3_thermal.run_stage3 --suburb Carlton
 python -m tools.visualise_results --suburb Carlton
 ```
@@ -42,7 +44,10 @@ see Setup below.
   OPeNDAP is the primary source (no auth needed — discovered Aug 2026), with
   NASA POWER and user CSV as fallbacks. A pre-extracted hourly BARRA2 CSV can
   be ingested via `--barra-csv`.
-- Stage 3 thermal modelling: working (per-building R_roof heat-ingress model).
+- Stage 3 thermal modelling: working. Per-building **transient finite-volume**
+  roof heat-ingress model (`stage3_thermal/heat_ingress_model.py`) over a full
+  hourly BARRA2 year — reports cooling-season electricity saved and the winter
+  heating penalty separately. Replaced the inferred-R_roof calculator Sep 2026.
 - Seasonal analysis: `tools/seasonal_analysis.py` shows the monthly
   cooling-benefit vs heating-penalty tradeoff with R_roof sensitivity sweeps.
 - Gemini validation database: 507 buildings assessed (Clayton 302, Carlton 205)
@@ -102,8 +107,10 @@ data/output/stage2_{suburb}.parquet
 data/output/stage2_{suburb}.csv
         |
         v
-Stage 3: thermal model
-  absorbed solar delta → heat conducted → cooling load → electricity saved
+Stage 3: transient roof heat-ingress model
+  resolve suburb hourly BARRA2 weather (cache / OPeNDAP fetch / offline sample)
+  per building: march the layered-roof model at current vs cool absorptance
+  difference → cooling-season saving + winter heating penalty → electricity, CO2
         |
         v
 data/output/stage3_{suburb}.parquet
@@ -376,15 +383,28 @@ Stage 2 appends these columns to the Stage 1 table:
 
 ## Running Stage 3
 
-Stage 3 reads Stage 2 output and applies a thermal physics chain to produce
-per-building cooling electricity savings.
+Stage 3 runs a **transient 1-D finite-volume heat-ingress model** through a
+layered roof for every building (ported from `stage3_thermal/heat_ingress_model.ipynb`),
+marching it once at the building's current solar absorptance and once at the
+cool-roof target, and differencing the plaster→interior heat flow.
 
 ```bash
 python -m stage3_thermal.run_stage3 --suburb "Carlton"
-python -m stage3_thermal.run_stage3 --suburb "Carlton" --debug
+python -m stage3_thermal.run_stage3 --suburb "Carlton" --year 2007 --debug
+python -m stage3_thermal.run_stage3 --suburb "Carlton" --weather-csv path/to/hourly.csv
 ```
 
-Prerequisites: Stage 2 output must exist (`data/output/stage2_{suburb}.parquet`).
+Prerequisites:
+
+- Stage 2 output (`data/output/stage2_{suburb}.parquet`).
+- An **hourly** BARRA2 weather series for the suburb, auto-resolved in this order:
+  `--weather-csv` → cached `data/raw/barra/heat_ingress_{suburb}_{year}.csv` →
+  BARRA2 OPeNDAP fetch (`tools.fetch_heat_ingress_weather`; needs `xarray` +
+  `pydap` + network, ~5 min/suburb, then cached) → committed
+  `data/samples/heat_ingress_{suburb}_{year}.csv` (offline fallback; Carlton only).
+
+Runtime is ~5–10 min per suburb (≈790k solver steps × two scenarios, vectorised
+across all buildings).
 
 ### Stage 3 Outputs
 
@@ -392,77 +412,59 @@ Stage 3 appends these columns to the Stage 2 table:
 
 | Column | Description |
 | --- | --- |
-| `roof_r_value_m2k` | Roof thermal resistance R_roof inferred from building attributes (m²·K/W) |
-| `h_out_w_m2k` | Outdoor surface coefficient — wind-derived from `mean_wind_speed_ms` when available, else the fixed 25 W/m²K fallback |
-| `heat_transfer_fraction` | Effective roof→interior fraction, `U/(U+h_out)`, incl. multistorey attenuation |
-| `heat_to_interior_kwh_yr` | Solar heat conducted through roof to building interior |
-| `cooling_load_reduction_kwh_yr` | Reduction in cooling load (subset of heat to interior) |
-| `electricity_saved_kwh_yr` | Actual cooling electricity saved (after HVAC COP) |
-| `co2_electricity_saved_kg_yr` | CO2 avoided from the electricity saving |
+| `roof_heat_ingress_base_kwh_m2_yr` | Annual roof→interior heat per m² roof, at the current absorptance (signed) |
+| `roof_heat_ingress_cool_kwh_m2_yr` | Same, at `COOL_ROOF_ABSORPTANCE` (0.20) |
+| `cooling_season_heat_avoided_kwh_yr` | Interior heat the cool roof keeps out during hours with outdoor temp ≥ 18 °C, × roof surface area |
+| `heating_season_heat_added_kwh_yr` | Wanted winter solar gain the cool roof rejects (hours < 18 °C), × roof surface area |
+| `cooling_fraction_applied` / `hvac_cop` | Audit — `COOLING_FRACTION` and COP by building type |
+| `electricity_saved_kwh_yr` | Cooling-season electricity saved = `cooling_season_heat_avoided × 0.70 / COP` |
+| `heating_penalty_electricity_kwh_yr` | Extra winter heating electricity = `heating_season_heat_added × 0.70 / COP` |
+| `net_electricity_saved_kwh_yr` | `electricity_saved − heating_penalty_electricity` |
+| `co2_electricity_saved_kg_yr` | CO2 avoided from the cooling-season electricity saving |
+| `net_co2_electricity_saved_kg_yr` | CO2 avoided net of the heating penalty |
 
 Output files:
 
 - `data/output/stage3_{suburb}.parquet`
 - `data/output/stage3_{suburb}.csv`
 
-### Stage 3 Thermal Parameters
+### Stage 3 Model
 
-The roof-to-interior heat fraction is now derived **per building** from an
-inferred roof thermal resistance `R_roof`, following the roof-only heat-ingress
-framing in Maggie's model:
-
-```
-U_roof   = 1 / R_roof
-fraction = U_roof / (U_roof + h_out)
-```
-
-`h_out` (outdoor surface film coefficient) is wind-dependent when BARRA2 wind
-data is available, via the McAdams (1954) simple forced-convection
-correlation for an exterior building surface:
+Per building, one forward-Euler finite-volume march (`dt ≈ 40 s`, clamped below
+the cavity-layer stability limit) through four layers — steel deck / bulk
+insulation / ceiling cavity / plaster (`Input Tables/Regular_Roof.csv`, one
+stack for every building). Boundary conditions:
 
 ```
-h_out = 5.7 + 3.8 * wind_speed_ms     # McAdams; falls back to 25 W/m²K when no wind data
+outer:  q = α·(rsdsdir + rsdsdif) + h_ext·(T_out − T_steel) + ε·σ·((T_out − 10)⁴ − T_steel⁴)
+h_ext:  5.7 + 3.8·V_local        (McAdams; V_local = BARRA2 10 m wind brought to roof height)
+inner:  q = (T_plaster − T_indoor) / (R_plaster/2 + 1/h_i),   T_indoor = 20 °C fixed
 ```
 
-More wind → higher `h_out` → the roof sheds absorbed heat back to the outside
-air more efficiently → a *smaller* fraction conducts inward. The fixed 25
-W/m²K fallback (ISO 6946's standard external surface coefficient) is used when
-the irradiance source isn't BARRA2 (NASA POWER, user CSV, Melbourne default) —
-this reproduces the pre-wind-model results exactly for those runs.
+The cool-roof saving is `march(α_before) − march(0.20)`, integrated per hour and
+split by that hour's outdoor temperature against the 18 °C cooling/heating base.
+The first 48 h are discarded as thermal spin-up. Per-building kWh =
+per-m² result × `roof_surface_area_m2`.
 
-`R_roof` is inferred from Stage 1 attributes (no construction-age field exists):
-
-| Building | Inferred R_roof | Resulting fraction |
+| Parameter | Value | Source |
 | --- | --- | --- |
-| Commercial / industrial / warehouse | R1.5 | ≈ 0.026 |
-| Residential, tiled roof (default) | R2.5 | ≈ 0.016 |
-| Residential, metal roof (older-stock proxy) | R1.5 | ≈ 0.026 |
-| Unknown attributes | R2.5 | ≈ 0.016 |
+| Roof stack | steel 0.42 mm / insulation 164 mm / cavity 300 mm / plaster 13 mm | `Input Tables/Regular_Roof.csv` |
+| Cavity R (downward flow) | 0.23 m²·K/W | ISO 6946 unventilated airspace (notebook transient value) |
+| Cooling / heating fraction | 0.70 / 0.70 | NatHERS 6-star Melbourne basis |
+| HVAC COP | 3.0 residential, 4.0 commercial | GEMS 2019 / AIRAH DA19 |
+| Sky temperature | `T_out − 10 K` | Notebook long-wave assumption |
 
-Other parameters:
+**Known limitations:**
 
-| Parameter | Value | Description |
-| --- | --- | --- |
-| Outdoor surface coefficient `h_out` | `5.7 + 3.8×wind_ms` (McAdams), fallback 25 W/m²K | Wind-dependent when BARRA2 wind data is available |
-| Multistorey attenuation | ×0.5 for 4+ storeys | Extra thermal-mass/slab attenuation |
-| Cooling fraction | 0.70 | Fraction of interior heat gain driving active cooling |
-| HVAC COP | 3.0 (residential), 4.0 (commercial) | Split system / VRF baseline |
-
-**Known limitation:** the McAdams correlation is a standard building-energy-
-simulation default (also used by EnergyPlus's "SimpleCombined" exterior
-convection model), not re-validated here for Australian roof geometries or
-BARRA2's ~11 km wind resolution — same unvalidated-constant caveat as the rest
-of Stage 3.
-
-The R2.5 default reproduces the previous single heat-transfer constant, so
-well-insulated stock is unchanged while poorly-insulated stock now correctly
-shows a larger benefit. As a result, `electricity_saved_kwh_yr` is roughly
-0.3–0.6% of `energy_saved_kwh_yr` from Stage 2 (the bulk of absorbed-solar
-reduction never reaches the conditioned interior through an insulated roof).
-
-**Known limitation:** `R_roof` is a documented proxy from `building_type` /
-`roof_material`, not a measured value — Stage 1 provides no construction age.
-Replacing it with ABS/VicMap construction-era data is a future improvement.
+- All buildings share one roof construction; only absorptance, pitch and area
+  vary. `roof_material` is not yet mapped to different layer stacks.
+- The 18 °C hourly cooling/heating split, the 0.70 demand fractions, the sky-
+  temperature depression and the McAdams `h_ext` correlation are standard
+  building-simulation defaults, not validated against Stuart's NatHERS runs.
+- No separate heating COP — `HVAC_COP_*` is reused for the heating penalty.
+- `azimuth_deg` is carried through but numerically inert (`rsdsdir` is treated
+  as already incidence-corrected); a per-plane incidence projection is future work.
+- One BARRA2 reference year (2007), suburb-uniform (`~11 km grid`).
 
 ## Visualisation
 
@@ -507,6 +509,30 @@ python -m tools.seasonal_analysis --list-suburbs
 Writes `stage2_{suburb}_seasonal.png`. Key finding (Aug 2026): in Melbourne,
 the winter heating penalty is the same magnitude as the summer cooling
 benefit — net annual effect is near zero.
+
+### Heat Ingress Model Notebook
+
+`heat_ingress_model.ipynb` is a standalone transient (finite-volume) roof
+heat-ingress model — hourly heat flux through a layered roof for a single
+building, used to sanity-check the Stage 3 steady-state assumptions. It reads
+three CSVs from `Input Tables/` (next to the notebook, committed to the repo):
+
+- `material_properties_table4.csv`, `Regular_Roof.csv` — roof layer / material
+  properties.
+- `barra2_{lat}_{lon}_{year}.csv` — a single-point hourly BARRA2 weather
+  extract (`time_UTC, rsdsdir_Wm2, rsdsdif_Wm2, temp_K, rel_humidity_percent,
+  wind_ms, rsds_total_Wm2, temp_C`).
+
+The BARRA2 CSV is regenerated straight from the same public NCI THREDDS
+OPeNDAP endpoint Stage 2 uses (no login) — no Google Drive dependency:
+
+```bash
+python -m tools.fetch_heat_ingress_weather --lat -37.91 --lon 145.13 --year 2007
+# writes Input Tables/barra2_-37.91_145.13_2007.csv (8,760 rows)
+```
+
+Variables pulled: `rsds`, `rsdsdir` (diffuse = rsds − rsdsdir), `tas`, `hurs`,
+`sfcWind`. Needs `xarray` + `pydap` (`pip install pydap`).
 
 ### Downloading Shared Tiles
 
@@ -656,18 +682,18 @@ conclusions.
 6. Stage 2 currently uses a single-year BARRA2 climate sample (2007); a proper
    30-year climate normal requires a longer run
    (`--start-year 1990 --end-year 2020`).
-7. Stage 3 roof insulation `R_roof` is inferred per building from
-   `building_type` / `roof_material` (no construction-age data exists), then
-   drives the heat-transfer fraction via `U/(U+h_out)`. `h_out` is now
-   wind-dependent (BARRA2 `sfcWind`, McAdams correlation) where BARRA2 is the
-   irradiance source, else the fixed 25 W/m²K fallback. COP and cooling
-   fraction remain Melbourne defaults. No measured per-building insulation is
-   available — the R_roof mapping is a documented proxy.
-8. **Stage 3 models cooling savings only — no heating penalty.** The seasonal
-   analysis (`tools.seasonal_analysis`) shows the winter heating penalty is
-   the same magnitude as the summer cooling benefit in Melbourne; net annual
-   effect is near zero. The `HEATING_FRACTION` constant exists but is not yet
-   wired into Stage 3. This must be fixed before final FYP reporting.
+7. Stage 3's transient model uses **one roof construction for every building**
+   (`Input Tables/Regular_Roof.csv`: steel deck / bulk insulation / ceiling
+   cavity / plaster). Only solar absorptance, pitch and area vary per building.
+   `roof_material` is not yet mapped to different layer stacks, and there is no
+   measured per-building construction data.
+8. Stage 3's demand fractions (0.70), the 18 °C cooling/heating hour split, the
+   `T_sky = T_out − 10 K` long-wave term, the McAdams `h_ext` correlation, and
+   reusing one COP for both cooling and heating are standard building-simulation
+   defaults, **not validated** against Stuart's NatHERS runs. It also uses a
+   single BARRA2 reference year (2007), suburb-uniform at ~11 km resolution.
+   `net_electricity_saved_kwh_yr` (cooling saving minus heating penalty) is the
+   headline number; per the seasonal analysis the two roughly cancel in Melbourne.
 9. `--max-tiles` is not a reliable spatial smoke-test cap in the current Stage 1
    pipeline because later steps still use the full tile folder/query extent.
 10. Some footprint sources map large compounds as one building polygon rather
@@ -680,16 +706,16 @@ Ranked by impact on the defensibility of the final FYP numbers.
 
 ### High Priority
 
-1. **Add the heating penalty to Stage 3.** The seasonal analysis proved the
-   winter penalty matches the summer benefit in magnitude — shipping
-   cooling-only savings is wrong for Melbourne. Wire `HEATING_FRACTION` into
-   `thermal_calculator.py` with a monthly/seasonal split driven by CDD/HDD.
-2. **Validate Stage 3 constants.** Every headline electricity-saving number is
-   scaled by unvalidated Melbourne defaults (`H_OUTSIDE`, `COOLING_FRACTION`,
-   `HEATING_FRACTION`, COP, the R_roof proxy table). Validate against Stuart's
-   NatHERS runs or AS/NZS 4859.1 simulation, and publish a sensitivity
-   analysis over the plausible parameter ranges (all constants live in
-   `config/settings.py`).
+1. **Validate the Stage 3 heat-ingress model.** The transient model
+   (`stage3_thermal/heat_ingress_model.py`) is now per-building, but its inputs
+   are unvalidated: the single `Regular_Roof.csv` layer stack, the 18 °C
+   cooling/heating split, the 0.70 demand fractions, the `T_out − 10 K` sky
+   temperature, the McAdams `h_ext`, and one COP for both cooling and heating.
+   Validate against Stuart's NatHERS runs / AS-NZS 4859.1 and publish a
+   sensitivity analysis (all constants live in `config/settings.py`).
+2. **Per-material roof construction.** Every building currently uses one roof
+   stack — map `roof_material` (metal deck / tile-on-batten / …) to distinct
+   layer build-ups with sourced density/Cp/thickness.
 3. **True suburb boundaries.** Replace rectangular bboxes with ABS SA2
    polygons, add an `inside_suburb` flag, report canonical in-boundary totals,
    and draw the boundary on annotations.
@@ -704,14 +730,18 @@ Ranked by impact on the defensibility of the final FYP numbers.
 6. Run BARRA2 for a full climate normal (1990–2020) instead of the single
    2007 sample.
 7. Validate the absorptance lookup against local building stock data.
-8. Replace the metal-roof-as-older-stock R_roof proxy with construction-era
-   data (ABS/VicMap) if obtainable.
+8. Give the model a floating indoor dead-band (currently a fixed 20 °C
+   setpoint) and a direction-dependent cavity resistance (0.23 down / 0.16 up).
 
 ### Done
 
+- **Stage 3 rebuilt as a per-building transient heat-ingress model** — Sep 2026.
+  Replaces the inferred-R_roof algebraic calculator; marches the layered-roof
+  model at current vs cool absorptance over a full year of hourly BARRA2
+  weather and reports the cooling-season saving and the winter heating penalty
+  separately. See `DECISION_LOG.md` 2026-09-10.
 - Wind-dependent `h_out` in Stage 3 (BARRA2 `sfcWind`, McAdams correlation) —
-  Aug 2026. Falls back to the fixed 25 W/m²K constant when BARRA2 wind data
-  isn't the irradiance source.
+  Aug 2026. Now folded into the transient model's hourly `h_ext`.
 - BARRA2 OPeNDAP is live (no NCI auth needed) — Aug 2026.
 - HSV classifier validated against Gemini (507 buildings, both suburbs) —
   Aug 2026. Agreement rates documented in Known Limitations.

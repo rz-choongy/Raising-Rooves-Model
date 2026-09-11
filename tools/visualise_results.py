@@ -50,8 +50,8 @@ REQUIRED_STAGE2_COLS = {
 REQUIRED_STAGE3_COLS = {
     "electricity_saved_kwh_yr",
     "co2_electricity_saved_kg_yr",
-    "heat_to_interior_kwh_yr",
-    "cooling_load_reduction_kwh_yr",
+    "net_electricity_saved_kwh_yr",
+    "heating_penalty_electricity_kwh_yr",
 }
 
 # AER State of the Energy Market 2023 — Victorian residential average
@@ -118,8 +118,9 @@ def load_stage3(suburb_key: str) -> pd.DataFrame | None:
     """
     Load Stage 3 output for the suburb, or return None if not yet generated.
 
-    Stage 3 parquet contains all Stage 2 columns plus four thermal columns.
-    When present it supersedes Stage 2 as the primary data source.
+    Stage 3 parquet contains all Stage 2 columns plus the transient
+    heat-ingress model's thermal columns. When present it supersedes Stage 2
+    as the primary data source.
     """
     parquet_path = OUTPUT_DIR / f"stage3_{suburb_key}.parquet"
     csv_path = OUTPUT_DIR / f"stage3_{suburb_key}.csv"

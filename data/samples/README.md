@@ -8,6 +8,7 @@ clone can run Stages 2 and 3 immediately — no API keys, no tile downloads.
 | File | What it is |
 | --- | --- |
 | `stage1_carlton.parquet` | Real Stage 1 output for Carlton: 6,177 buildings with footprint area, roof material/colour, absorptance estimates. |
+| `heat_ingress_carlton_2007.csv` | Hourly BARRA2 weather at the Carlton centroid for 2007 (8,760 rows: direct/diffuse irradiance, temp, RH, wind). Stage 3's offline fallback when a live BARRA2 fetch isn't possible. Regenerate with `python -m tools.fetch_heat_ingress_weather --lat -37.7998 --lon 144.9667 --year 2007 --out data/samples/heat_ingress_carlton_2007.csv`. |
 
 ## How to use it
 

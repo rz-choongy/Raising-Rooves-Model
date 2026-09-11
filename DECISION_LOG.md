@@ -4,6 +4,105 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-09-10 — Stage 3 engine: per-building transient heat-ingress model
+
+**Decision:** Replace `stage3_thermal/thermal_calculator.py` (the algebraic
+`fraction = U/(U+h_out)` calculator with an inferred `R_roof`) with a vectorised
+port of the team's transient 1-D finite-volume roof model
+(`stage3_thermal/heat_ingress_model.py`, from `heat_ingress_model.ipynb`). It
+runs for **every building**: `MidTemps` is a `(layers, buildings)` array so a
+whole suburb marches in lockstep — same forward-Euler method, `dt ≈ 40 s`
+(clamped to the cavity-layer stability limit), same equations as the notebook.
+
+Per-building cool-roof saving = march at the building's `absorptance_before`
+minus march at `COOL_ROOF_ABSORPTANCE`, integrated hourly over a full BARRA2
+year (2007) and split by outdoor temperature against the 18 °C base: hours
+≥ 18 °C → cooling-season saving, hours < 18 °C → winter heating penalty
+(reported separately). First 48 h discarded as spin-up. Per-building kWh =
+per-m² result × `roof_surface_area_m2`.
+
+**Why:**
+- The inferred `R_roof` (`R_ROOF_BY_CATEGORY`, metal-residential nudge,
+  `MULTISTOREY_ATTENUATION`) was always a stopgap "while we figured out this
+  model" (Ryan). It guessed a number Stage 1 can't observe.
+- The transient model captures roof thermal mass and diurnal lag, which the
+  steady `U/(U+h)` fraction cannot, and it produces the heating penalty
+  natively (roadmap item 1) instead of needing a bolt-on CDD/HDD split.
+- The repo already had the BARRA2 OPeNDAP plumbing and, after
+  `tools.fetch_heat_ingress_weather`, a way to get the hourly direct/diffuse/
+  wind series the model needs.
+
+**Choices locked with Ryan:**
+- Vectorised NumPy port (not archetype bucketing) — true per-building output,
+  ~5–10 min/suburb.
+- One roof stack (`Input Tables/Regular_Roof.csv`) for every building; only
+  absorptance, pitch and area vary. `roof_material`→stack mapping is future work.
+- Full simulated year, cooling and heating reported separately.
+- Cooling/heating hour split by outdoor temp vs `CDD_BASE_TEMP` (18 °C).
+- Per-building kWh scaled by `roof_surface_area_m2` (matches the notebook's
+  per-m²-of-sloped-roof solve).
+
+**Rejected:**
+- *Keep `thermal_calculator.py` as a `--fast` path* — Ryan chose a clean
+  replacement; the inferred-R method is gone.
+- *Archetype bucketing* — fast but quantises per-building results and degrades
+  as more per-building inputs are added.
+- *Summer-only / cooling-only scope* — the heating penalty is the whole point of
+  roadmap item 1.
+
+**Superseded:** "2026-07-03 — Stage 3 heat transfer: per-building R_roof instead
+of one constant" and the wind-dependent-`h_out` follow-up from "2026-08-27" (the
+McAdams `h_ext` is now the transient model's hourly outer film coefficient).
+
+**Tradeoffs / follow-up:** the model's inputs are unvalidated — the single roof
+stack, the 18 °C split, the 0.70 demand fractions, `T_sky = T_out − 10 K`, one
+COP for cooling and heating. `azimuth_deg` is carried but numerically inert.
+Validate against Stuart's NatHERS runs; add per-material stacks; sensitivity
+analysis. Offline runs use a committed `data/samples/heat_ingress_carlton_2007.csv`.
+
+**Code affected:** `stage3_thermal/{heat_ingress_model.py (new), pipeline.py,
+run_stage3.py, __init__.py}`, `stage3_thermal/heat_ingress_model.ipynb` (moved
+here), `config/settings.py`, `tests/test_heat_ingress_model.py` (replaces
+`test_stage3_thermal.py`), `tools/fetch_heat_ingress_weather.py`, `README.md`.
+
+---
+
+## 2026-09-10 — Heat-ingress notebook weather: repo-generated BARRA2 extract
+
+**Decision:** `heat_ingress_model.ipynb` (renamed from `Final_Code.ipynb`) now reads
+its three input CSVs from a repo-tracked `Input Tables/` folder. The BARRA2 hourly
+weather CSV is produced by `tools.fetch_heat_ingress_weather`, which pulls a single
+grid point from the same public NCI THREDDS OPeNDAP endpoint Stage 2 uses
+(`rsds`, `rsdsdir`, `tas`, `hurs`, `sfcWind`; diffuse = rsds − rsdsdir). Model
+logic in the notebook is unchanged.
+
+**Why:** The notebook previously loaded `../Input Tables/barra2_-37.91_145.13_2007.csv`
+off a teammate's Google Drive, so it could not run from a clone. The repo already
+had the BARRA2 OPeNDAP plumbing — only `rsdsdir` and `hurs` were missing from
+`BARRA2_VARIABLES`.
+
+**Fixed in passing (typos that blocked execution, physics intent unchanged, per
+Ryan):** `math.pi()` → `math.pi`; `math.cos()` → `math.cos(2*math.pi*hour_local/24)`
+in the Berdahl–Martin sky-temperature term, with `hour_local` = local clock hour
+of the first modelled timestep.
+
+**Rejected:**
+- *Fetch via `stage2_irradiance.barra_client`* — it returns monthly summary stats,
+  not the hourly direct/diffuse/RH columns the notebook needs.
+- *Commit the CSV under `data/raw/barra/`* — that path is git-ignored, so a clone
+  still wouldn't have the file.
+
+**Verified:** notebook runs end-to-end (nbconvert) for the single dummy building;
+plaster→indoor flux ≈ 12.9 W/m² at the first timestep, hourly heat ingress
+1.5–7.2 Wh/m² over the first 10 h of 1 Jan 2007.
+
+**Follow-up:** grid point resolves to lat −37.95 (nearest AUS-11 node), so values
+differ slightly from the old hand-built CSV. Wind/geometry are still dummy inputs
+in the notebook (`z_roof_m`, `roof_plan_area`, etc.) — wire to Stage 1/2 per-building
+data when this model is promoted past sanity-checking.
+
+---
+
 ## 2026-07-01 — Footprint source: OSM Overpass + VicMap/Microsoft supplement
 
 **Decision:** Use OpenStreetMap Overpass API as the primary footprint source, merging

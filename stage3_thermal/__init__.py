@@ -1,6 +1,7 @@
 """
 Stage 3 thermal model for the Raising Rooves pipeline.
 
-Converts the absorbed solar reduction from Stage 2 (energy_saved_kwh_yr)
-into realistic cooling electricity savings using building thermal physics.
+Runs a transient 1-D finite-volume roof heat-ingress model per building
+(ported from heat_ingress_model.ipynb) to estimate the cooling electricity
+saved — and the winter heating penalty — from a cool roof coating.
 """

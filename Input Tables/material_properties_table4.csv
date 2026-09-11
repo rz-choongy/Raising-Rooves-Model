@@ -1,0 +1,9 @@
+material_id,archetype,surface_type,scenario,R_value_m2K_W,U_value_W_m2K,solar_reflectance,thermal_emittance,SHGC,source,notes
+roof_existing_control,existing_standalone_house,roof,control_roof,2,,0.15,0.85,,Cool Roof Cost Benefit Analysis - Vol 4,Existing standalone roof with standard/control reflectance
+roof_existing_cool,existing_standalone_house,roof,cool_roof,2,,0.8,0.85,,Cool Roof Cost Benefit Analysis - Vol 4,Existing standalone roof with cool-roof reflectance
+roof_new_control,new_standalone_house,roof,control_roof,4.6,,0.15,0.85,,Cool Roof Cost Benefit Analysis - Vol 4,New standalone roof with standard/control reflectance
+roof_new_cool,new_standalone_house,roof,cool_roof,4.6,,0.8,0.85,,Cool Roof Cost Benefit Analysis - Vol 4,New standalone roof with cool-roof reflectance
+wall_existing,existing_standalone_house,wall,base_case,2.8,,0.15,0.85,,Cool Roof Cost Benefit Analysis - Vol 4,Existing standalone opaque wall assumption
+wall_new,new_standalone_house,wall,base_case,1,,0.15,0.85,,Cool Roof Cost Benefit Analysis - Vol 4,New standalone opaque wall assumption
+window_existing,existing_standalone_house,window,summer_base_case,,5.6,,,0.25,Cool Roof Cost Benefit Analysis - Vol 4,Existing standalone glazing; solar gain should use SHGC rather than opaque-surface reflectance
+window_new,new_standalone_house,window,summer_base_case,,2.5,,,0.25,Cool Roof Cost Benefit Analysis - Vol 4,New standalone glazing; solar gain should use SHGC rather than opaque-surface reflectance
