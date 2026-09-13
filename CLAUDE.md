@@ -86,12 +86,14 @@ benefits of cool roof interventions across Melbourne suburbs.
 ### Next Priorities (ranked — keep in sync with README Roadmap)
 
 1. Validate the Stage 3 transient model inputs against Stuart's NatHERS runs /
-   AS-NZS 4859.1: the single `Regular_Roof.csv` layer stack, the 18°C
+   AS-NZS 4859.1: the roof stacks' sourced properties, the 18°C
    cooling/heating hour split, `COOLING_FRACTION`/`HEATING_FRACTION` (0.70),
    `T_sky = T_out - 10 K`, one COP for cooling and heating. Publish a
    sensitivity analysis (constants in `config/settings.py`).
-2. Map `roof_material` to distinct per-building roof layer stacks (metal deck /
-   tile-on-batten / default) instead of one stack for every building.
+2. Extend per-material roof construction (2026-09-12 added a terracotta/
+   concrete-tile stack, `stack_for_material()`) — everything else still
+   defaults to the metal-deck stack. Add more materials; consider whether
+   terracotta and concrete tile need separate stacks.
 3. Replace rectangular bboxes with true ABS SA2 suburb polygons and an
    `inside_suburb` flag; report in-boundary totals.
 4. Filter non-building footprints from Stage 1 (Gemini found 24% of Clayton
@@ -199,9 +201,12 @@ Quick reference:
 - **Stage 1:** OSM + VicMap footprints, HSV pixel classifier. `energy_saved_kwh_yr`
   is absorbed solar reduction — NOT electricity savings. Stage 3 handles that.
 - **Stage 3:** per-building transient finite-volume roof model
-  (`stage3_thermal/heat_ingress_model.py`). Marches `Regular_Roof.csv` layers at
-  current vs cool absorptance over a full hourly BARRA2 year; splits the delta
-  by 18°C outdoor temp into cooling saving vs heating penalty. Constants in
+  (`stage3_thermal/heat_ingress_model.py`). Two roof stacks — metal deck
+  (`Regular_Roof.csv`, default) and terracotta/concrete tile (`Tile_Roof.csv`),
+  picked per building via `stack_for_material(roof_material)`; output carries a
+  `roof_construction` audit column. Marches current vs cool absorptance over a
+  full hourly BARRA2 year; splits the delta by 18°C outdoor temp into cooling
+  saving vs heating penalty. Constants in
   `config/settings.py` (`HEAT_INGRESS_*`, `COOLING_FRACTION`, COP) are
   unvalidated Melbourne defaults — the #1 roadmap item.
 
