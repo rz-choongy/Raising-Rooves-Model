@@ -7,18 +7,18 @@ a clear message on failure.
 
 import os
 
-from config.settings import VICTORIA_BBOX
+from config.settings import AUSTRALIA_BBOX
 
 
 def validate_bbox(bbox: tuple[float, float, float, float]) -> bool:
     """
-    Check that a bounding box is valid and within Victoria (incl. regional centres).
+    Check that a bounding box is valid and within Australia (sanity check only).
 
     Args:
         bbox: (south, west, north, east) in EPSG:4326.
 
     Raises:
-        ValueError: If bbox is malformed or outside Victoria.
+        ValueError: If bbox is malformed or outside Australia.
     """
     if len(bbox) != 4:
         raise ValueError(f"Bounding box must have 4 values (south, west, north, east), got {len(bbox)}")
@@ -29,13 +29,15 @@ def validate_bbox(bbox: tuple[float, float, float, float]) -> bool:
     if west >= east:
         raise ValueError(f"West ({west}) must be less than east ({east})")
 
-    # Check within Victoria state bounds (with margin)
-    vic_south, vic_west, vic_north, vic_east = VICTORIA_BBOX
+    # Check within Australia bounds (with margin) -- a loose sanity check, not
+    # a state restriction. config/suburbs.py is mostly Victorian but can carry
+    # interstate comparison suburbs (e.g. Parramatta, NSW).
+    au_south, au_west, au_north, au_east = AUSTRALIA_BBOX
     margin = 0.5  # degrees
-    if south < vic_south - margin or north > vic_north + margin:
-        raise ValueError(f"Latitude ({south}, {north}) outside Victoria range")
-    if west < vic_west - margin or east > vic_east + margin:
-        raise ValueError(f"Longitude ({west}, {east}) outside Victoria range")
+    if south < au_south - margin or north > au_north + margin:
+        raise ValueError(f"Latitude ({south}, {north}) outside Australia range")
+    if west < au_west - margin or east > au_east + margin:
+        raise ValueError(f"Longitude ({west}, {east}) outside Australia range")
 
     return True
 

@@ -1,11 +1,13 @@
 """
-Victorian suburb definitions for the Raising Rooves pipeline.
+Suburb definitions for the Raising Rooves pipeline.
 
 Each suburb has: name, ABS SA2 code (where available), centroid (lat, lon),
 and bounding box (south, west, north, east) in EPSG:4326.
 
 Covers Greater Melbourne (inner, middle, outer, diverse zone types) and
-Victoria's major regional centres for statewide cool roof analysis.
+Victoria's major regional centres for statewide cool roof analysis, plus a
+small number of interstate suburbs added for climate-contrast comparisons
+(see DECISION_LOG.md).
 """
 
 from dataclasses import dataclass
@@ -181,6 +183,16 @@ SUBURBS = {
         centroid=(-38.3830, 142.4810),
         bbox=(-38.4010, 142.4510, -38.3650, 142.5110),
         zone_type="residential",
+    ),
+    # ── Interstate comparison suburb ─────────────────────────────────────────
+    # Not Victorian -- included for climate contrast in cross-suburb Stage 3
+    # analysis (western Sydney basin vs. Victoria). See DECISION_LOG 2026-09-14.
+    "parramatta": Suburb(
+        name="Parramatta",
+        sa2_code="125041717",  # ABS SA2 "Parramatta - North"; CBD sits on the North/South split
+        centroid=(-33.8147, 151.0017),
+        bbox=(-33.8262, 150.9877, -33.8032, 151.0157),
+        zone_type="commercial",
     ),
 }
 

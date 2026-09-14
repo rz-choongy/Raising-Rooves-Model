@@ -91,11 +91,17 @@ BARRA2_VARIABLES = {
 
 MELBOURNE_BBOX = (-38.1, 144.5, -37.5, 145.5)  # south, west, north, east
 
-# Statewide bound for bbox sanity-checking (tile downloads). config/suburbs.py
-# already includes 8 regional Victoria centres (Geelong through Warrnambool),
-# so the validity check needs to cover the whole state, not just Melbourne.
-# Matches Victoria's real extent with a small margin.
+# Victoria's real extent with a small margin. Kept for reference (most
+# config/suburbs.py entries are Victorian); bbox sanity-checking itself uses
+# the wider AUSTRALIA_BBOX below so an out-of-state comparison suburb (e.g.
+# Parramatta, added 2026-09-14 for climate contrast) isn't rejected.
 VICTORIA_BBOX = (-39.2, 140.9, -33.9, 150.2)  # south, west, north, east
+
+# Country-wide bound for bbox sanity-checking (mainland + Tasmania, excluding
+# external territories). Loose on purpose -- it exists to catch gross errors
+# (wrong hemisphere, a transposed digit), not to constrain the suburb list to
+# one state.
+AUSTRALIA_BBOX = (-44.0, 112.0, -10.0, 154.0)  # south, west, north, east
 
 # ── Cooling/Heating Degree Day Base Temperatures ─────────────────────────────
 

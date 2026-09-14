@@ -4,6 +4,47 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-09-14 — Interstate comparison suburb: Parramatta, NSW; bbox validation widened to Australia
+
+**Decision:** Add `parramatta` to `config/suburbs.py` (SA2 `125041717`,
+"Parramatta - North" — the CBD sits on the North/South SA2 split; centroid
+-33.8147, 151.0017) alongside the existing all-Victorian suburb list, run
+through the full Stage 1→2→3 pipeline like any other suburb. To allow it,
+`shared/validate_bbox()` was widened from a Victoria-only sanity check
+(`VICTORIA_BBOX`, ±0.5°) to a whole-of-Australia one (`AUSTRALIA_BBOX`,
+mainland + Tasmania, ±0.5°) — same purpose (catch a transposed digit or wrong
+hemisphere), not a per-state allowlist. `VICTORIA_BBOX` is kept in
+`config/settings.py` for reference since most suburbs are still Victorian.
+
+**Why:** The Mildura/Warrnambool comparison showed net cool-roof benefit
+tracking climate almost monotonically across Victoria's own range (19–49%
+of hours ≥18°C). Ryan asked to extend that spectrum with a genuinely
+different Australian climate zone — western Sydney's basin (hotter, more
+humid summers than Melbourne, milder winters than regional Victoria) — for
+the multi-suburb comparison site (`tools.compare_suburbs` / the published
+"Heat Ledger" artifact).
+
+**Rejected:**
+- *Leave the validator Victoria-only and special-case Parramatta* — would
+  need an ever-growing list of per-suburb exceptions as more interstate
+  suburbs get added; a single country-wide bound is simpler and still catches
+  the actual error class the check exists for.
+- *A brand-new NSW-specific bbox constant mirroring `VICTORIA_BBOX`* —
+  unnecessary; the sanity check was never meant to be state-precise, only to
+  catch gross coordinate errors, so one loose Australia-wide bound covers both
+  states (and any future ones) without maintaining a growing set of per-state
+  boxes.
+
+**Follow-up:** The project's stated scope (`CLAUDE.md`, `README.md`) is still
+Melbourne/Victoria-focused — Parramatta is a one-off comparison suburb for
+Stage 3 climate-sensitivity analysis, not a signal the project is expanding
+to NSW. Revisit if more interstate suburbs get added.
+
+**Code/docs affected:** `config/settings.py`, `config/suburbs.py`,
+`shared/validation.py`.
+
+---
+
 ## 2026-09-14 — Stage 3 heat-ingress model: two-point indoor setpoint (18 °C heating / 20 °C cooling)
 
 **Decision:** Replace the single fixed `HEAT_INGRESS_INDOOR_SETPOINT_C = 20.0`
