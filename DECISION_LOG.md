@@ -4,6 +4,166 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-09-14 — Interstate comparison suburb: Parramatta, NSW; bbox validation widened to Australia
+
+**Decision:** Add `parramatta` to `config/suburbs.py` (SA2 `125041717`,
+"Parramatta - North" — the CBD sits on the North/South SA2 split; centroid
+-33.8147, 151.0017) alongside the existing all-Victorian suburb list, run
+through the full Stage 1→2→3 pipeline like any other suburb. To allow it,
+`shared/validate_bbox()` was widened from a Victoria-only sanity check
+(`VICTORIA_BBOX`, ±0.5°) to a whole-of-Australia one (`AUSTRALIA_BBOX`,
+mainland + Tasmania, ±0.5°) — same purpose (catch a transposed digit or wrong
+hemisphere), not a per-state allowlist. `VICTORIA_BBOX` is kept in
+`config/settings.py` for reference since most suburbs are still Victorian.
+
+**Why:** The Mildura/Warrnambool comparison showed net cool-roof benefit
+tracking climate almost monotonically across Victoria's own range (19–49%
+of hours ≥18°C). Ryan asked to extend that spectrum with a genuinely
+different Australian climate zone — western Sydney's basin (hotter, more
+humid summers than Melbourne, milder winters than regional Victoria) — for
+the multi-suburb comparison site (`tools.compare_suburbs` / the published
+"Heat Ledger" artifact).
+
+**Rejected:**
+- *Leave the validator Victoria-only and special-case Parramatta* — would
+  need an ever-growing list of per-suburb exceptions as more interstate
+  suburbs get added; a single country-wide bound is simpler and still catches
+  the actual error class the check exists for.
+- *A brand-new NSW-specific bbox constant mirroring `VICTORIA_BBOX`* —
+  unnecessary; the sanity check was never meant to be state-precise, only to
+  catch gross coordinate errors, so one loose Australia-wide bound covers both
+  states (and any future ones) without maintaining a growing set of per-state
+  boxes.
+
+**Follow-up:** The project's stated scope (`CLAUDE.md`, `README.md`) is still
+Melbourne/Victoria-focused — Parramatta is a one-off comparison suburb for
+Stage 3 climate-sensitivity analysis, not a signal the project is expanding
+to NSW. Revisit if more interstate suburbs get added.
+
+**Code/docs affected:** `config/settings.py`, `config/suburbs.py`,
+`shared/validation.py`.
+
+---
+
+## 2026-09-14 — Stage 3 heat-ingress model: two-point indoor setpoint (18 °C heating / 20 °C cooling)
+
+**Decision:** Replace the single fixed `HEAT_INGRESS_INDOOR_SETPOINT_C = 20.0`
+with two constants, `HEAT_INGRESS_HEATING_SETPOINT_C = 18.0` and
+`HEAT_INGRESS_COOLING_SETPOINT_C = 20.0`. The transient march
+(`march_interior_flux` / `_march_kernel` / `_march_numpy`) now picks the
+indoor reference temperature every solver substep from the instantaneous
+outdoor temperature: below 18 °C it holds the interior at 18 °C (heating
+setpoint), at or above 18 °C it holds 20 °C (cooling setpoint) — same
+convention as the existing `CDD_BASE_TEMP`/`HDD_BASE_TEMP` = 18 °C split used
+later to bucket the hourly flux delta into cooling saving vs heating penalty.
+
+**Why:** A single fixed 20 °C sink for every hour of the year overstated the
+temperature difference driving winter heat loss (and thus the heating
+penalty) — no real thermostat holds a house at 20 °C when it's heating in
+July. Aligning the indoor setpoint's switch point with the same 18 °C base
+already used for the cooling/heating split keeps the model internally
+consistent, at the cost of still not modelling a real dead-band (see
+follow-up).
+
+**Verified:** All 118 repo tests pass, including 27 in
+`test_heat_ingress_model.py` — the notebook-parity reference (`_notebook_reference_flux`)
+was updated to the same two-point switch, and one roof-construction
+comparison test (`test_mixed_roof_material_selects_stack_per_building`) was
+changed from comparing raw flux `std()` to comparing hour-to-hour flux
+`diff().std()` — the raw-`std()` margin between the metal and tile stacks in
+that 96 h May fixture was already razor-thin (<0.2%) under the old fixed
+setpoint, and flipped sign under the new one; the diff-based check is a more
+direct read of the claim it's testing ("steel swings harder hour-to-hour")
+and holds with a decisive margin under both setpoint schemes.
+Clayton January 2007 (summer, outdoor temp ≈18 °C almost the whole month) is
+unaffected — cooling/heating totals unchanged to within rounding, as expected
+since the setpoint rarely switches to 18 °C in that window. The effect will
+show up in winter months where outdoor temp is often below 18 °C.
+
+**Rejected:**
+- *A real floating dead-band (HVAC off between two temperatures, only
+  engages at the boundary)* — bigger change, needs its own validation pass;
+  tracked as a roadmap item (`README.md` "Give the model a floating indoor
+  dead-band").
+- *Keep 20 °C for both and only fix it in reporting* — the setpoint feeds the
+  physics (`q_inner`) directly, not just a post-hoc bucketing step, so a
+  reporting-only fix would not change the underlying heat-flow numbers.
+
+**Follow-up:** Still unvalidated against Stuart's NatHERS runs (roadmap
+item #1) — 18/20 °C are reasonable defaults, not measured. A real dead-band
+(HVAC off, indoor temperature floats between the two setpoints) is a
+separate, larger change.
+
+**Code/docs affected:** `config/settings.py`, `stage3_thermal/heat_ingress_model.py`,
+`tests/test_heat_ingress_model.py`, `README.md`.
+
+---
+
+## 2026-09-12 — Stage 3 roof construction: dedicated tile stack for terracotta/concrete
+
+**Decision:** Add a second roof construction, `Input Tables/Tile_Roof.csv`
+(terracotta/concrete tile 15 mm → roof-space airgap 500 mm → bulk insulation
+164 mm → plaster 13 mm), alongside the existing metal-deck stack. Every
+building's `roof_material` selects a stack (`stack_for_material()`):
+`terracotta` and `concrete_tile` → tile; everything else (metal, unknown,
+OSM's generic `"yes"`) → metal, unchanged from before. `heat_ingress_model.py`
+groups buildings by stack, marches each group separately (own stability-checked
+`dt`), and records which stack each building used in a new `roof_construction`
+output column.
+
+`load_roof_layers()` was generalised to stop assuming the metal stack's layer
+names/order: each CSV row now carries a `Layer_Role`
+(`outer_skin`/`insulation`/`airspace`/`inner_lining`), and the model finds the
+airspace layer (the one whose R gets the direction-dependent override and
+drives the conservative stability check) by role, not by a hardcoded "Cavity"
+name or a fixed array position — the tile stack's roof-space airgap sits
+directly under the tile (position 2) while the metal stack's cavity sits third
+(position 3), and both work through the same `RoofStack.cavity_index`.
+
+**Why:** Ryan asked what the model does for a terracotta-roofed building — the
+honest answer was "runs it through the steel-deck construction, only the
+absorptance number changes." That's a real gap: a 0.42 mm steel sheet
+(areal thermal mass ≈1,570 J/m²K) and a 15 mm concrete/terracotta tile
+(≈26,000 J/m²K, ~17× more) should not produce the same surface-temperature
+dynamics, and a single-building instrumented run confirmed it — the tile roof
+peaked ~7 °C cooler and ~1 h later than the metal roof on the same 39.8 °C
+Clayton day (2007-01-16), which is the expected qualitative signature of
+thermal lag from added mass.
+
+**Sourced values (Tile_Roof.csv):** tile thickness 15 mm, density 2,100 kg/m³,
+Cp 840 J/kgK, R = thickness/k with k≈1.1 W/mK (representative concrete/
+terracotta tile, not lab-measured); roof-space airgap treated with the same
+ISO 6946 unventilated-airspace R (0.23 m²·K/W downward) as the metal stack's
+cavity — a real ridge/eave-vented roof space would behave differently
+(documented limitation); insulation and plaster reused unchanged from the
+metal stack (ceiling construction doesn't depend on the roof skin).
+
+**Rejected:**
+- *Separate stacks for terracotta vs concrete tile* — the two differ mainly in
+  absorptance (already handled in Stage 2's `ABSORPTANCE_BY_MATERIAL`), not
+  enough in construction to justify two more sourced stacks yet. One shared
+  `Tile_Roof.csv` for both, revisit if evidence says otherwise.
+- *Generalise to a per-building continuum of layer stacks* — only two discrete
+  constructions are needed today; the group-by-stack march (not a per-building
+  layer array) keeps this a small, additive change to `run_model`.
+
+**Verified:** Clayton re-run, 2,829 buildings — 1,751 metal / 1,078 tile.
+Suburb net electricity saved: 354k → 386k kWh/yr (+32k, +9%); net CO2 avoided:
+279t → 305t/yr. For the 1,078 buildings newly on the tile stack specifically:
+net saving per building 121 → 151 kWh/yr. All 118 repo tests pass (27 in
+`test_heat_ingress_model.py`, incl. new stack-selection and mixed-material
+tests); `tools.compare_suburbs` unaffected (column names unchanged).
+
+**Follow-up:** model a ventilated (not sealed) roof-space airgap; consider
+splitting terracotta/concrete if their construction is shown to matter;
+extend to more materials (currently only metal vs tile — see README roadmap).
+
+**Code affected:** `stage3_thermal/heat_ingress_model.py`, `Input Tables/{Regular_Roof.csv
+(added Layer_Role column), Tile_Roof.csv (new)}`, `config/settings.py`,
+`tests/test_heat_ingress_model.py`, `README.md`.
+
+---
+
 ## 2026-09-10 — Stage 3 engine: per-building transient heat-ingress model
 
 **Decision:** Replace `stage3_thermal/thermal_calculator.py` (the algebraic

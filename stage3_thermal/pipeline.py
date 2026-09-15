@@ -98,7 +98,7 @@ def _resolve_weather(
         table = build_hourly_weather_table(lat, lon, year)
         ensure_dir(cache.parent)
         table.to_csv(cache, index=False)
-        return table, f"BARRA2 OPeNDAP → {cache}"
+        return table, f"BARRA2 OPeNDAP -> {cache}"
     except Exception as exc:  # noqa: BLE001 - fall back to the offline sample
         logger.warning(
             "BARRA2 hourly fetch failed (%s). Falling back to the offline sample.", exc

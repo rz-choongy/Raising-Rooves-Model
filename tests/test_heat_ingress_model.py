@@ -21,8 +21,11 @@ import pytest
 
 from config.settings import (
     COOL_ROOF_ABSORPTANCE,
+    HEAT_INGRESS_COOLING_SETPOINT_C,
+    HEAT_INGRESS_HEATING_SETPOINT_C,
     HVAC_COP_COMMERCIAL,
     HVAC_COP_RESIDENTIAL,
+    ROOF_LAYERS_TILE_CSV,
 )
 from stage3_thermal import heat_ingress_model as him
 from stage3_thermal.heat_ingress_model import (
@@ -39,6 +42,7 @@ from stage3_thermal.heat_ingress_model import (
     max_stable_timestep,
     resolve_timestep,
     run_model,
+    stack_for_material,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "weather_96h.csv"
@@ -70,7 +74,8 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
     hi = 3.0
     emissivity = 0.9
     const = _STEFAN_BOLTZMANN_W_M2K4
-    T_inside = 20.0 + _KELVIN
+    T_heat = HEAT_INGRESS_HEATING_SETPOINT_C + _KELVIN
+    T_cool = HEAT_INGRESS_COOLING_SETPOINT_C + _KELVIN
 
     tph = int(np.ceil(3600.0 / dt))
     temp_k = weather.outdoor_temp_c + _KELVIN
@@ -94,6 +99,7 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
             )
             for j in range(1, 4):
                 q[j] = 2 * (mid[j - 1] - mid[j]) / (R[j - 1] + R[j])
+            T_inside = T_heat if outside[ts] < T_heat else T_cool
             q[4] = (mid[3] - T_inside) / (R[3] / 2 + 1 / hi)
             acc += q[4] * dt / 3600.0
             mid = mid + dt * (q[:-1] - q[1:]) / (density * Cp * thick)
@@ -106,6 +112,7 @@ class TestRoofStack:
     def test_layer_order(self, stack):
         assert stack.layer_names == ("Steel", "Insulation", "Cavity", "Plaster")
         assert stack.thickness_m.shape == (4,)
+        assert stack.cavity_index == 2
 
     def test_cavity_override(self):
         overridden = load_roof_layers(cavity_r_m2k_w=0.23)
@@ -116,6 +123,35 @@ class TestRoofStack:
     def test_areal_heat_capacity(self, stack):
         expected = stack.density_kg_m3 * stack.heat_capacity_j_kgk * stack.thickness_m
         np.testing.assert_allclose(stack.areal_heat_capacity_j_m2k, expected)
+
+    def test_tile_stack_loads_and_has_more_mass_than_steel(self, stack):
+        tile = load_roof_layers(ROOF_LAYERS_TILE_CSV, cavity_r_m2k_w=0.23)
+        assert tile.thickness_m.shape == (4,)
+        assert tile.layer_names[0].lower().startswith("concrete") or "tile" in tile.layer_names[0].lower()
+        assert tile.cavity_index == 1  # roof space sits directly under the tile
+        # A tile roof's outer skin has far more thermal mass than a thin steel deck.
+        assert tile.areal_heat_capacity_j_m2k[0] > 10 * stack.areal_heat_capacity_j_m2k[0]
+
+    def test_layer_role_validation(self, tmp_path):
+        bad = tmp_path / "bad.csv"
+        bad.write_text(
+            "Material_type,Thickness_m,Density_Kg_m3,Spec_Heat_Cap_J_KgK,R_value_m2K_W,Layer_Role\n"
+            "A,0.01,1,1,0.1,outer_skin\nB,0.01,1,1,0.1,insulation\n"
+            "C,0.01,1,1,0.1,not_a_role\nD,0.01,1,1,0.1,inner_lining\n"
+        )
+        with pytest.raises(ValueError):
+            load_roof_layers(bad)
+
+
+class TestStackSelection:
+    def test_tile_materials_map_to_tile(self):
+        assert stack_for_material("terracotta") == "tile"
+        assert stack_for_material("concrete_tile") == "tile"
+        assert stack_for_material("Terracotta") == "tile"  # case-insensitive
+
+    def test_everything_else_maps_to_metal(self):
+        for material in ("metal_dark", "metal_light", "other", None, "yes"):
+            assert stack_for_material(material) == "metal"
 
 
 # ── Weather ─────────────────────────────────────────────────────────────────
@@ -263,6 +299,48 @@ class TestRunModel:
         )
         out = run_model(df, weather_df, roof_stack=stack)
         assert list(out.index) == [10, 11, 12]
-        assert list(out.columns) == list(_OUTPUT_COLUMNS)
+        assert list(out.columns) == ["roof_construction", *_OUTPUT_COLUMNS]
+        assert (out["roof_construction"] == "_single").all()
         # NaN absorptance handled (conservative dark roof) → finite output.
         assert np.isfinite(out["electricity_saved_kwh_yr"].to_numpy()).all()
+
+    def test_mixed_roof_material_selects_stack_per_building(self, weather_df):
+        # Identical absorptance/area/type -- only roof_material differs -- so any
+        # difference in output isolates the construction (thermal mass) effect.
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.85, 0.85],
+                "roof_surface_area_m2": [150.0, 150.0],
+                "building_type": ["house", "house"],
+                "roof_material": ["metal_dark", "terracotta"],
+            },
+            index=[0, 1],
+        )
+        out = run_model(df, weather_df)
+        assert out.loc[0, "roof_construction"] == "metal"
+        assert out.loc[1, "roof_construction"] == "tile"
+
+        # Different thermal mass -> different (unrounded) hourly flux for the
+        # same absorptance/weather. The tile's outer skin has far more mass, so
+        # its flux trace should be damped relative to the thin steel deck's.
+        metal_stack, tile_stack = load_roof_layers(), load_roof_layers(ROOF_LAYERS_TILE_CSV)
+        weather = build_hourly_weather(weather_df)
+        dt = resolve_timestep(metal_stack, float(weather.h_ext_w_m2k.max()))
+        metal_flux = march_interior_flux(weather, metal_stack, 0.85, dt_s=dt)
+        tile_flux = march_interior_flux(weather, tile_stack, 0.85, dt_s=dt)
+        assert not np.allclose(metal_flux, tile_flux)
+        # steel swings harder hour-to-hour (less thermal mass to damp the response);
+        # hour-to-hour deltas isolate that better than overall std, which also
+        # carries the mean level and is sensitive to the heating/cooling setpoint mix.
+        assert np.diff(metal_flux, axis=0).std() > np.diff(tile_flux, axis=0).std()
+
+    def test_default_stacks_cover_only_terracotta_and_concrete(self, weather_df):
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.6, 0.6, 0.6],
+                "roof_surface_area_m2": [100.0, 100.0, 100.0],
+                "roof_material": ["terracotta", "concrete_tile", "metal_light"],
+            },
+        )
+        out = run_model(df, weather_df)
+        assert list(out["roof_construction"]) == ["tile", "tile", "metal"]

@@ -1,5 +1,5 @@
 Material_type ,Thickness_m,Density_Kg_m3,Spec_Heat_Cap_J_KgK,R_value_m2K_W,Layer_Role
-Steel,0.00042,7800,480,0.0000084,outer_skin
+Concrete_Terracotta_Tile,0.015,2100,840,0.0136,outer_skin
+RoofSpace,0.5,1.225,1000,0.333,airspace
 Insulation,0.164,12,840,4.1,insulation
-Cavity,0.3,1.225,1000,0.333,airspace
 Plaster,0.013,950,840,0.08125,inner_lining

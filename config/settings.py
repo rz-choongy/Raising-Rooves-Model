@@ -91,11 +91,17 @@ BARRA2_VARIABLES = {
 
 MELBOURNE_BBOX = (-38.1, 144.5, -37.5, 145.5)  # south, west, north, east
 
-# Statewide bound for bbox sanity-checking (tile downloads). config/suburbs.py
-# already includes 8 regional Victoria centres (Geelong through Warrnambool),
-# so the validity check needs to cover the whole state, not just Melbourne.
-# Matches Victoria's real extent with a small margin.
+# Victoria's real extent with a small margin. Kept for reference (most
+# config/suburbs.py entries are Victorian); bbox sanity-checking itself uses
+# the wider AUSTRALIA_BBOX below so an out-of-state comparison suburb (e.g.
+# Parramatta, added 2026-09-14 for climate contrast) isn't rejected.
 VICTORIA_BBOX = (-39.2, 140.9, -33.9, 150.2)  # south, west, north, east
+
+# Country-wide bound for bbox sanity-checking (mainland + Tasmania, excluding
+# external territories). Loose on purpose -- it exists to catch gross errors
+# (wrong hemisphere, a transposed digit), not to constrain the suburb list to
+# one state.
+AUSTRALIA_BBOX = (-44.0, 112.0, -10.0, 154.0)  # south, west, north, east
 
 # ── Cooling/Heating Degree Day Base Temperatures ─────────────────────────────
 
@@ -153,9 +159,13 @@ MELBOURNE_DEFAULT_GHI_KWH_M2_YR = 1850.0
 # BARRA2 reference year for the hourly weather the model marches over.
 HEAT_INGRESS_REFERENCE_YEAR = 2007
 
-# Fixed reference indoor temperature (°C). The model holds the interior at this
-# setpoint (no floating dead-band yet).
-HEAT_INGRESS_INDOOR_SETPOINT_C = 20.0
+# Indoor reference temperature (°C) the transient march holds the interior at,
+# switched hour-by-hour (no floating dead-band beyond this) on outdoor temp:
+# outdoor < HEAT_INGRESS_HEATING_SETPOINT_C -> heating setpoint; outdoor >=
+# HEAT_INGRESS_HEATING_SETPOINT_C -> cooling setpoint. Matches the CDD/HDD
+# 18 °C split used later to bucket the resulting heat flow as saving vs penalty.
+HEAT_INGRESS_HEATING_SETPOINT_C = 18.0
+HEAT_INGRESS_COOLING_SETPOINT_C = 20.0
 
 # Long-wave emissivity of the outer roof surface (Stephan-Boltzmann sky exchange).
 HEAT_INGRESS_ROOF_EMISSIVITY = 0.9
@@ -175,10 +185,11 @@ HEAT_INGRESS_SOLVER_DT_S = 40
 # Hours of simulation discarded as thermal spin-up before results are integrated.
 HEAT_INGRESS_SPINUP_HOURS = 48
 
-# Layered roof construction the model marches heat through. One stack for every
-# building (steel deck / bulk insulation / ceiling cavity / plaster). Committed
-# to the repo so a clone runs Stage 3 offline.
-ROOF_LAYERS_CSV = PROJECT_ROOT / "Input Tables" / "Regular_Roof.csv"
+# Layered roof constructions the model marches heat through, both committed to
+# the repo so a clone runs Stage 3 offline. Which stack a building uses is
+# selected by roof_material (stage3_thermal.heat_ingress_model.stack_for_material).
+ROOF_LAYERS_CSV = PROJECT_ROOT / "Input Tables" / "Regular_Roof.csv"  # steel deck (default)
+ROOF_LAYERS_TILE_CSV = PROJECT_ROOT / "Input Tables" / "Tile_Roof.csv"  # terracotta / concrete tile
 
 # Outdoor surface film coefficient h_ext is computed hour-to-hour from the local
 # BARRA2 wind speed via the McAdams (1954) simple forced-convection correlation

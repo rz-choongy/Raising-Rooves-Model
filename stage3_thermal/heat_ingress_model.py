@@ -5,13 +5,18 @@ This is the pipeline engine ported from ``stage3_thermal/heat_ingress_model.ipyn
 (the single-building reference). It marches a 1-D forward-Euler finite-volume
 conduction model through a layered roof:
 
-    outside air ──[h_ext + shortwave + long-wave]── steel ── insulation ── cavity
-      ── plaster ──[h_internal]── indoor air (held at a fixed setpoint)
+    outside air ──[h_ext + shortwave + long-wave]── outer skin ── insulation
+      ── airspace ── inner lining ──[h_internal]── indoor air (fixed setpoint)
+
+Two roof constructions are committed (``RoofStack``, ``load_roof_layers``):
+steel deck / bulk insulation / cavity / plaster (default), and terracotta or
+concrete tile / roof space / bulk insulation / plaster. ``stack_for_material``
+picks per building from its ``roof_material``.
 
 The notebook loops one building at a time; here ``MidTemps`` is a ``(layers,
-buildings)`` array so every building in a suburb is marched in lockstep. The
-method, timestep, and equations are identical — only the per-building Python
-loop is removed.
+buildings)`` array so every building sharing a roof construction is marched in
+lockstep. The method, timestep, and equations are identical — only the
+per-building Python loop is removed.
 
 Stage 3 cool-roof saving per building = march the model at the building's current
 solar absorptance and again at ``COOL_ROOF_ABSORPTANCE``, then difference the
@@ -53,7 +58,8 @@ from config.settings import (
     GRID_EMISSIONS_FACTOR_KG_KWH,
     H_OUT_WIND_INTERCEPT_W_M2K,
     H_OUT_WIND_SLOPE_W_M2K_PER_MS,
-    HEAT_INGRESS_INDOOR_SETPOINT_C,
+    HEAT_INGRESS_COOLING_SETPOINT_C,
+    HEAT_INGRESS_HEATING_SETPOINT_C,
     HEAT_INGRESS_INTERNAL_H_W_M2K,
     HEAT_INGRESS_ROOF_EMISSIVITY,
     HEAT_INGRESS_ROOF_HEIGHT_M,
@@ -63,6 +69,7 @@ from config.settings import (
     HVAC_COP_COMMERCIAL,
     HVAC_COP_RESIDENTIAL,
     ROOF_LAYERS_CSV,
+    ROOF_LAYERS_TILE_CSV,
 )
 from shared.logging_config import setup_logging
 
@@ -71,7 +78,6 @@ logger = setup_logging("heat_ingress_model")
 # ── Physical / model constants ───────────────────────────────────────────────
 _STEFAN_BOLTZMANN_W_M2K4 = 5.6703e-8
 _KELVIN = 273.15
-_LAYER_ORDER = ("Steel", "Insulation", "Cavity", "Plaster")
 
 # Sky temperature for the long-wave term, following the notebook's transient
 # cell: T_sky ≈ T_air − 10 K (the "TSky = Tair - (10 to 20) K" assumption).
@@ -114,6 +120,16 @@ def hvac_cop(building_type) -> float:
 
 
 # ── Roof construction ────────────────────────────────────────────────────────
+# A roof stack is exactly 4 conduction layers, outermost first. The physics
+# (march_interior_flux) treats every layer identically -- what differs between
+# a metal-deck roof and a tile roof is the property VALUES in each layer, not
+# the equations. One row must carry Layer_Role="airspace" (the layer whose
+# R gets the direction-dependent downward/upward override, and the one used
+# for the conservative stability check) -- for both stacks shipped today that's
+# the roof cavity / roof-space layer, but it need not be a fixed position.
+_VALID_LAYER_ROLES = frozenset({"outer_skin", "insulation", "airspace", "inner_lining"})
+
+
 @dataclass(frozen=True)
 class RoofStack:
     """Layered roof construction, outermost layer first."""
@@ -123,6 +139,7 @@ class RoofStack:
     density_kg_m3: np.ndarray
     heat_capacity_j_kgk: np.ndarray
     r_value_m2k_w: np.ndarray
+    cavity_index: int  # position of the Layer_Role == "airspace" row
 
     @property
     def areal_heat_capacity_j_m2k(self) -> np.ndarray:
@@ -136,37 +153,61 @@ def load_roof_layers(
     cavity_r_m2k_w: float | None = CAVITY_R_DOWNWARD_M2K_W,
 ) -> RoofStack:
     """
-    Load the roof layer stack from a ``Regular_Roof.csv``-schema file.
+    Load a roof layer stack from a 4-row, outer-to-inner layer CSV.
 
     Columns: ``Material_type, Thickness_m, Density_Kg_m3, Spec_Heat_Cap_J_KgK,
-    R_value_m2K_W``. Rows are reordered to steel → insulation → cavity → plaster.
+    R_value_m2K_W, Layer_Role``. Rows are used in file order (outer -> inner);
+    exactly one row must have ``Layer_Role == "airspace"``.
 
     Args:
-        csv_path: CSV path. Defaults to ``config.settings.ROOF_LAYERS_CSV``.
-        cavity_r_m2k_w: Override for the cavity layer's R-value (see
+        csv_path: CSV path. Defaults to ``config.settings.ROOF_LAYERS_CSV``
+            (the metal-deck stack).
+        cavity_r_m2k_w: Override for the airspace layer's R-value (see
             ``CAVITY_R_DOWNWARD_M2K_W``). ``None`` keeps the CSV value.
     """
     path = Path(csv_path) if csv_path is not None else Path(ROOF_LAYERS_CSV)
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
-    df = df.assign(_key=df["Material_type"].str.strip()).set_index("_key")
-    missing = [name for name in _LAYER_ORDER if name not in df.index]
-    if missing:
-        raise ValueError(f"{path} is missing roof layers: {missing}")
-    df = df.loc[list(_LAYER_ORDER)]
+    if len(df) != 4:
+        raise ValueError(f"{path} must have exactly 4 roof layers, found {len(df)}.")
+    if "Layer_Role" not in df.columns:
+        raise ValueError(f"{path} is missing the Layer_Role column.")
+    roles = df["Layer_Role"].str.strip().tolist()
+    bad_roles = set(roles) - _VALID_LAYER_ROLES
+    if bad_roles:
+        raise ValueError(f"{path} has unknown Layer_Role value(s): {bad_roles}")
+    airspace_rows = [i for i, r in enumerate(roles) if r == "airspace"]
+    if len(airspace_rows) != 1:
+        raise ValueError(f"{path} must have exactly one Layer_Role=='airspace' row.")
+    cavity_index = airspace_rows[0]
 
     r_values = df["R_value_m2K_W"].to_numpy(float)
     if cavity_r_m2k_w is not None:
         r_values = r_values.copy()
-        r_values[_LAYER_ORDER.index("Cavity")] = float(cavity_r_m2k_w)
+        r_values[cavity_index] = float(cavity_r_m2k_w)
 
     return RoofStack(
-        layer_names=_LAYER_ORDER,
+        layer_names=tuple(df["Material_type"].str.strip()),
         thickness_m=df["Thickness_m"].to_numpy(float),
         density_kg_m3=df["Density_Kg_m3"].to_numpy(float),
         heat_capacity_j_kgk=df["Spec_Heat_Cap_J_KgK"].to_numpy(float),
         r_value_m2k_w=r_values,
+        cavity_index=cavity_index,
     )
+
+
+# Which committed stack a building's roof_material maps to. Anything not
+# listed here (metal, unknown, "yes", ...) uses the default metal-deck stack —
+# scoped deliberately: only terracotta/concrete tile get their own construction
+# for now (see DECISION_LOG). Both tile materials share ROOF_LAYERS_TILE_CSV;
+# they differ enough in absorptance (handled in Stage 2) but not in construction
+# to justify separate stacks yet.
+_TILE_ROOF_MATERIALS = frozenset({"terracotta", "concrete_tile"})
+
+
+def stack_for_material(roof_material) -> str:
+    """Return 'tile' or 'metal' -- which committed roof stack a material uses."""
+    return "tile" if _normalize_label(roof_material) in _TILE_ROOF_MATERIALS else "metal"
 
 
 # ── Weather preparation ──────────────────────────────────────────────────────
@@ -235,7 +276,7 @@ def max_stable_timestep(
     (lowest) cavity resistance and the peak h_ext over the whole weather series.
     """
     r = stack.r_value_m2k_w.copy()
-    r[_LAYER_ORDER.index("Cavity")] = min(r[_LAYER_ORDER.index("Cavity")], 0.16)
+    r[stack.cavity_index] = min(r[stack.cavity_index], 0.16)
     face_conductance = 2.0 / (r[:-1] + r[1:])
     inner_conductance = 1.0 / (r[-1] / 2.0 + 1.0 / internal_h_w_m2k)
     conductance_sum = np.concatenate(
@@ -290,7 +331,8 @@ def _march_kernel(
     dt,
     substeps,
     internal_h,
-    t_inside_k,
+    heating_setpoint_k,
+    cooling_setpoint_k,
     rad_coeff,
     sky_dep,
     mid_init,        # (4, B)
@@ -325,6 +367,7 @@ def _march_kernel(
                 inc = s0 + d_inc * f
                 hx = he0 + d_he * f
                 sky = t_out - sky_dep
+                t_inside_k = heating_setpoint_k if t_out < heating_setpoint_k else cooling_setpoint_k
 
                 q_outer = (
                     a * inc
@@ -347,7 +390,8 @@ def _march_kernel(
 
 def _march_numpy(
     temp_k, incident, h_ext, absorptance, r_values, areal_capacity,
-    dt, substeps, internal_h, t_inside_k, rad_coeff, sky_dep, mid,
+    dt, substeps, internal_h, heating_setpoint_k, cooling_setpoint_k,
+    rad_coeff, sky_dep, mid,
 ):
     n_intervals = temp_k.shape[0] - 1
     n_layers = mid.shape[0]
@@ -364,6 +408,7 @@ def _march_numpy(
         acc = np.zeros(absorptance.size)
         for s in range(substeps):
             sky = t_out[s] - sky_dep
+            t_inside_k = heating_setpoint_k if t_out[s] < heating_setpoint_k else cooling_setpoint_k
             q_outer = (
                 absorptance * inc[s]
                 + hx[s] * (t_out[s] - mid[0])
@@ -388,7 +433,8 @@ def march_interior_flux(
     *,
     dt_s: float | None = None,
     internal_h_w_m2k: float = HEAT_INGRESS_INTERNAL_H_W_M2K,
-    indoor_setpoint_c: float = HEAT_INGRESS_INDOOR_SETPOINT_C,
+    heating_setpoint_c: float = HEAT_INGRESS_HEATING_SETPOINT_C,
+    cooling_setpoint_c: float = HEAT_INGRESS_COOLING_SETPOINT_C,
     emissivity: float = HEAT_INGRESS_ROOF_EMISSIVITY,
     initial_temps_k=None,
 ) -> np.ndarray:
@@ -401,6 +447,10 @@ def march_interior_flux(
         absorptance: Scalar or length-``B`` array of roof solar absorptances.
         dt_s: Solver timestep. Defaults to ``HEAT_INGRESS_SOLVER_DT_S`` (caller
             should pass a stability-checked value via ``resolve_timestep``).
+        heating_setpoint_c / cooling_setpoint_c: Indoor reference temperature
+            the march holds each substep, switched on instantaneous outdoor
+            temp — below ``heating_setpoint_c`` uses the heating setpoint,
+            otherwise the cooling setpoint (see ``config.settings``).
         initial_temps_k: Optional ``(L,)`` or ``(L, B)`` starting layer mid-plane
             temperatures. Default: every layer at the first outdoor temperature
             (the run should discard a spin-up window — see ``annual_benefit``).
@@ -429,7 +479,8 @@ def march_interior_flux(
 
     r = stack.r_value_m2k_w
     cap = stack.areal_heat_capacity_j_m2k
-    t_inside_k = indoor_setpoint_c + _KELVIN
+    heating_setpoint_k = heating_setpoint_c + _KELVIN
+    cooling_setpoint_k = cooling_setpoint_c + _KELVIN
     rad_coeff = emissivity * _STEFAN_BOLTZMANN_W_M2K4
 
     if initial_temps_k is None:
@@ -449,14 +500,14 @@ def march_interior_flux(
             temp_k, incident, h_ext, absorptance,
             r[0], r[1], r[2], r[3],
             cap[0], cap[1], cap[2], cap[3],
-            dt, substeps, internal_h_w_m2k, t_inside_k, rad_coeff,
-            _SKY_DEPRESSION_K, np.ascontiguousarray(mid), out,
+            dt, substeps, internal_h_w_m2k, heating_setpoint_k, cooling_setpoint_k,
+            rad_coeff, _SKY_DEPRESSION_K, np.ascontiguousarray(mid), out,
         )
     else:
         out = _march_numpy(
             temp_k, incident, h_ext, absorptance, r, cap,
-            dt, substeps, internal_h_w_m2k, t_inside_k, rad_coeff,
-            _SKY_DEPRESSION_K, mid,
+            dt, substeps, internal_h_w_m2k, heating_setpoint_k, cooling_setpoint_k,
+            rad_coeff, _SKY_DEPRESSION_K, mid,
         )
 
     if not np.all(np.isfinite(out)):
@@ -564,52 +615,89 @@ def annual_benefit(
     )
 
 
+def _load_default_stacks() -> dict[str, RoofStack]:
+    """The two committed roof stacks, keyed the same way as ``stack_for_material``."""
+    return {
+        "metal": load_roof_layers(ROOF_LAYERS_CSV),
+        "tile": load_roof_layers(ROOF_LAYERS_TILE_CSV),
+    }
+
+
 def run_model(
     df: pd.DataFrame,
     weather_df: pd.DataFrame,
     *,
-    roof_stack: RoofStack | None = None,
+    roof_stack: RoofStack | dict[str, RoofStack] | None = None,
     absorptance_col: str = "absorptance_before",
     area_col: str = "roof_surface_area_m2",
     building_type_col: str = "building_type",
+    roof_material_col: str = "roof_material",
     cool_absorptance: float = COOL_ROOF_ABSORPTANCE,
 ) -> pd.DataFrame:
     """
     End-to-end Stage 3 engine: per-building transient benefit for one suburb.
 
-    Marches every building once at its ``absorptance_before`` and once at
-    ``cool_absorptance`` (stacked into a single vectorised march), then rolls up
-    to the annual per-building columns.
+    Each building is assigned a roof construction by ``roof_material``
+    (``stack_for_material`` -- terracotta/concrete tile get the tile stack,
+    everything else the metal-deck stack). Buildings are grouped by stack,
+    each group is marched once at its ``absorptance_before`` and once at
+    ``cool_absorptance`` (stacked into a single vectorised march per group,
+    each with its own stability-checked timestep), then rolled up to the
+    annual per-building columns.
+
+    Args:
+        roof_stack: ``None`` (default: both committed stacks, selected per
+            building), a single ``RoofStack`` (forces every building onto it —
+            useful for tests/back-compat), or an explicit ``{"metal": ...,
+            "tile": ...}`` dict.
 
     Returns a DataFrame indexed like ``df`` with :data:`_OUTPUT_COLUMNS`.
     """
-    stack = roof_stack if roof_stack is not None else load_roof_layers()
     weather = build_hourly_weather(weather_df)
-    dt = resolve_timestep(stack, float(np.max(weather.h_ext_w_m2k)))
 
-    n = len(df)
-    absorptance_before = (
+    if roof_stack is None:
+        stacks = _load_default_stacks()
+        group_key = df[roof_material_col].apply(stack_for_material) if roof_material_col in df.columns else pd.Series("metal", index=df.index)
+    elif isinstance(roof_stack, RoofStack):
+        stacks = {"_single": roof_stack}
+        group_key = pd.Series("_single", index=df.index)
+    else:
+        stacks = roof_stack
+        group_key = df[roof_material_col].apply(stack_for_material)
+
+    absorptance_before_all = (
         pd.to_numeric(df[absorptance_col], errors="coerce")
         .fillna(1.0 - COOL_ROOF_ABSORPTANCE)  # unknown → conservative dark roof
         .to_numpy(float)
     )
-    area = pd.to_numeric(df[area_col], errors="coerce").fillna(0.0).to_numpy(float)
-    building_type = (
-        df[building_type_col].tolist() if building_type_col in df.columns else [None] * n
+    area_all = pd.to_numeric(df[area_col], errors="coerce").fillna(0.0).to_numpy(float)
+    building_type_all = (
+        df[building_type_col].tolist() if building_type_col in df.columns else [None] * len(df)
     )
 
-    # One march for both scenarios: columns [0:n] = current, [n:2n] = cool roof.
-    stacked_absorptance = np.concatenate(
-        [absorptance_before, np.full(n, float(cool_absorptance))]
-    )
-    logger.info(
-        "Marching %d buildings × 2 scenarios over %d h at dt=%.1f s (%d substeps/h)...",
-        n, weather.n_hours, dt, int(np.ceil(3600.0 / dt)),
-    )
-    flux = march_interior_flux(weather, stack, stacked_absorptance, dt_s=dt)
+    results = []
+    for key, stack in stacks.items():
+        mask = (group_key == key).to_numpy()
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        dt = resolve_timestep(stack, float(np.max(weather.h_ext_w_m2k)))
+        absorptance = absorptance_before_all[mask]
+        area = area_all[mask]
+        building_type = [building_type_all[i] for i in np.where(mask)[0]]
 
-    result = annual_benefit(
-        flux[:, :n], flux[:, n:], weather, area, building_type
-    )
-    result.index = df.index
+        # One march for both scenarios: columns [0:n] = current, [n:2n] = cool roof.
+        stacked_absorptance = np.concatenate([absorptance, np.full(n, float(cool_absorptance))])
+        logger.info(
+            "Marching %d '%s'-roof buildings × 2 scenarios over %d h at dt=%.1f s "
+            "(%d substeps/h)...",
+            n, key, weather.n_hours, dt, int(np.ceil(3600.0 / dt)),
+        )
+        flux = march_interior_flux(weather, stack, stacked_absorptance, dt_s=dt)
+        group_result = annual_benefit(flux[:, :n], flux[:, n:], weather, area, building_type)
+        group_result.insert(0, "roof_construction", key)
+        group_result.index = df.index[mask]
+        results.append(group_result)
+
+    result = pd.concat(results).loc[df.index]
     return result

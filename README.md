@@ -431,15 +431,31 @@ Output files:
 ### Stage 3 Model
 
 Per building, one forward-Euler finite-volume march (`dt ≈ 40 s`, clamped below
-the cavity-layer stability limit) through four layers — steel deck / bulk
-insulation / ceiling cavity / plaster (`Input Tables/Regular_Roof.csv`, one
-stack for every building). Boundary conditions:
+the airspace-layer stability limit) through four layers, outer to inner.
+Boundary conditions:
 
 ```
-outer:  q = α·(rsdsdir + rsdsdif) + h_ext·(T_out − T_steel) + ε·σ·((T_out − 10)⁴ − T_steel⁴)
+outer:  q = α·(rsdsdir + rsdsdif) + h_ext·(T_out − T_outer) + ε·σ·((T_out − 10)⁴ − T_outer⁴)
 h_ext:  5.7 + 3.8·V_local        (McAdams; V_local = BARRA2 10 m wind brought to roof height)
-inner:  q = (T_plaster − T_indoor) / (R_plaster/2 + 1/h_i),   T_indoor = 20 °C fixed
+inner:  q = (T_inner − T_indoor) / (R_inner/2 + 1/h_i)
+        T_indoor = 18 °C when T_out < 18 °C (heating setpoint), else 20 °C (cooling setpoint)
 ```
+
+**Two roof constructions are committed**, selected per building from
+`roof_material` (`stack_for_material()`):
+
+| `roof_material` | Stack | Layers (outer → inner) | CSV |
+| --- | --- | --- | --- |
+| `terracotta`, `concrete_tile` | tile | tile 15 mm → roof space 500 mm → insulation 164 mm → plaster 13 mm | `Input Tables/Tile_Roof.csv` |
+| everything else (metal, unknown, `"yes"`, …) | metal (default) | steel deck 0.42 mm → insulation 164 mm → cavity 300 mm → plaster 13 mm | `Input Tables/Regular_Roof.csv` |
+
+Each CSV row carries a `Layer_Role` (`outer_skin` / `insulation` / `airspace` /
+`inner_lining`) — the model finds the airspace layer by role, not by position or
+name, so the tile stack can put its roof-space airgap directly under the tile
+(position 2) while the metal stack keeps its cavity third (position 3), and
+still share one solver. Buildings are grouped by stack and each group is
+marched (and its stability-checked `dt` computed) separately; Stage 3 output
+carries a `roof_construction` audit column (`"metal"` / `"tile"`) per building.
 
 The cool-roof saving is `march(α_before) − march(0.20)`, integrated per hour and
 split by that hour's outdoor temperature against the 18 °C cooling/heating base.
@@ -448,16 +464,26 @@ per-m² result × `roof_surface_area_m2`.
 
 | Parameter | Value | Source |
 | --- | --- | --- |
-| Roof stack | steel 0.42 mm / insulation 164 mm / cavity 300 mm / plaster 13 mm | `Input Tables/Regular_Roof.csv` |
-| Cavity R (downward flow) | 0.23 m²·K/W | ISO 6946 unventilated airspace (notebook transient value) |
+| Airspace R (downward flow) | 0.23 m²·K/W | ISO 6946 unventilated airspace (notebook transient value) — same convention applied to both stacks' airspace layer |
+| Indoor heating / cooling setpoint | 18 °C / 20 °C, switched on outdoor temp | `HEAT_INGRESS_HEATING_SETPOINT_C` / `HEAT_INGRESS_COOLING_SETPOINT_C` — unvalidated Melbourne default |
 | Cooling / heating fraction | 0.70 / 0.70 | NatHERS 6-star Melbourne basis |
 | HVAC COP | 3.0 residential, 4.0 commercial | GEMS 2019 / AIRAH DA19 |
 | Sky temperature | `T_out − 10 K` | Notebook long-wave assumption |
 
 **Known limitations:**
 
-- All buildings share one roof construction; only absorptance, pitch and area
-  vary. `roof_material` is not yet mapped to different layer stacks.
+- Only `terracotta`/`concrete_tile` get their own construction; every other
+  `roof_material` (including `metal_light`, unknown, and OSM's generic `"yes"`)
+  still shares one metal-deck stack — the original single-stack behaviour, now
+  scoped rather than universal.
+- Terracotta and concrete tile share one stack (`Tile_Roof.csv`) — the two
+  materials differ enough in *absorptance* (handled in Stage 2) to matter more
+  than their construction difference, but that's a simplifying assumption, not
+  a measurement.
+- The roof-space airgap under tiles is modelled as an **unventilated** ISO 6946
+  airspace, the same as the metal stack's service cavity. A real tiled roof
+  space is usually ridge/eave-vented and would exchange heat with outdoor air
+  more readily than this model allows — not represented.
 - The 18 °C hourly cooling/heating split, the 0.70 demand fractions, the sky-
   temperature depression and the McAdams `h_ext` correlation are standard
   building-simulation defaults, not validated against Stuart's NatHERS runs.
@@ -713,9 +739,12 @@ Ranked by impact on the defensibility of the final FYP numbers.
    temperature, the McAdams `h_ext`, and one COP for both cooling and heating.
    Validate against Stuart's NatHERS runs / AS-NZS 4859.1 and publish a
    sensitivity analysis (all constants live in `config/settings.py`).
-2. **Per-material roof construction.** Every building currently uses one roof
-   stack — map `roof_material` (metal deck / tile-on-batten / …) to distinct
-   layer build-ups with sourced density/Cp/thickness.
+2. **Extend per-material roof construction.** Terracotta/concrete tile now get
+   a dedicated stack (below); metal-deck is still the default for everything
+   else, including OSM's generic `"yes"` and unclassified buildings. Add more
+   stacks (e.g. skillion vs pitched-with-ceiling framing) and consider
+   splitting terracotta from concrete tile if construction, not just
+   absorptance, turns out to matter.
 3. **True suburb boundaries.** Replace rectangular bboxes with ABS SA2
    polygons, add an `inside_suburb` flag, report canonical in-boundary totals,
    and draw the boundary on annotations.
@@ -730,11 +759,17 @@ Ranked by impact on the defensibility of the final FYP numbers.
 6. Run BARRA2 for a full climate normal (1990–2020) instead of the single
    2007 sample.
 7. Validate the absorptance lookup against local building stock data.
-8. Give the model a floating indoor dead-band (currently a fixed 20 °C
-   setpoint) and a direction-dependent cavity resistance (0.23 down / 0.16 up).
+8. Give the model a floating indoor dead-band (currently a two-point 18 °C
+   heating / 20 °C cooling setpoint switched on outdoor temp, not a real
+   thermostat cycle) and a direction-dependent cavity resistance (0.23 down /
+   0.16 up).
 
 ### Done
 
+- **Per-material roof construction for Stage 3** — Sep 2026. Terracotta and
+  concrete tile roofs now march a dedicated tile-on-batten stack
+  (`Input Tables/Tile_Roof.csv`) instead of being forced onto the metal-deck
+  construction; `roof_construction` audit column added. See `DECISION_LOG.md`.
 - **Stage 3 rebuilt as a per-building transient heat-ingress model** — Sep 2026.
   Replaces the inferred-R_roof algebraic calculator; marches the layered-roof
   model at current vs cool absorptance over a full year of hourly BARRA2
