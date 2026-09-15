@@ -184,7 +184,7 @@ SUBURBS = {
         bbox=(-38.4010, 142.4510, -38.3650, 142.5110),
         zone_type="residential",
     ),
-    # ── Interstate comparison suburb ─────────────────────────────────────────
+    # ── Interstate comparison suburbs ────────────────────────────────────────
     # Not Victorian -- included for climate contrast in cross-suburb Stage 3
     # analysis (western Sydney basin vs. Victoria). See DECISION_LOG 2026-09-14.
     "parramatta": Suburb(
@@ -193,6 +193,48 @@ SUBURBS = {
         centroid=(-33.8147, 151.0017),
         bbox=(-33.8262, 150.9877, -33.8032, 151.0157),
         zone_type="commercial",
+    ),
+    "west_end": Suburb(
+        name="West End",
+        sa2_code="305011112",  # ABS SA2 "West End" (Brisbane) -- subtropical climate contrast
+        centroid=(-27.4820, 153.0080),
+        bbox=(-27.4900, 153.0000, -27.4740, 153.0170),
+        zone_type="mixed",
+    ),
+    "subiaco": Suburb(
+        name="Subiaco",
+        sa2_code="503021042",  # ABS SA2 "Subiaco - Shenton Park" -- Mediterranean/semi-arid climate contrast
+        centroid=(-31.9490, 115.8268),
+        bbox=(-31.9590, 115.8148, -31.9390, 115.8388),
+        zone_type="residential",
+    ),
+    "norwood": Suburb(
+        name="Norwood",
+        sa2_code="401051017",  # ABS SA2 "Norwood" -- inner Adelaide, semi-arid Mediterranean climate contrast
+        centroid=(-34.9230, 138.6330),
+        bbox=(-34.9310, 138.6230, -34.9150, 138.6430),
+        zone_type="mixed",
+    ),
+    "north_hobart": Suburb(
+        name="North Hobart",
+        sa2_code="60102",  # ABS SA2 "Hobart - North East" (North Hobart is a SAL within this SA2) -- cool-temperate climate contrast
+        centroid=(-42.8722, 147.3144),
+        bbox=(-42.8800, 147.3040, -42.8640, 147.3240),
+        zone_type="mixed",
+    ),
+    "parap": Suburb(
+        name="Parap",
+        sa2_code="701011007",  # ABS SA2 "Parap" (Darwin) -- tropical monsoonal climate contrast
+        centroid=(-12.4396, 130.8582),
+        bbox=(-12.4476, 130.8482, -12.4316, 130.8682),
+        zone_type="mixed",
+    ),
+    "braddon": Suburb(
+        name="Braddon",
+        sa2_code="801051051",  # ABS SA2 "Braddon" (Canberra) -- inland highland/cool-temperate climate contrast
+        centroid=(-35.2721, 149.1357),
+        bbox=(-35.2801, 149.1257, -35.2641, 149.1457),
+        zone_type="mixed",
     ),
 }
 
