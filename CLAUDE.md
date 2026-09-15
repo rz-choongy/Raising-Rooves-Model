@@ -205,8 +205,10 @@ Quick reference:
   (`Regular_Roof.csv`, default) and terracotta/concrete tile (`Tile_Roof.csv`),
   picked per building via `stack_for_material(roof_material)`; output carries a
   `roof_construction` audit column. Marches current vs cool absorptance over a
-  full hourly BARRA2 year; splits the delta by 18°C outdoor temp into cooling
-  saving vs heating penalty. Constants in
+  full hourly BARRA2 year at a two-point indoor setpoint (18°C heating / 20°C
+  cooling, switched on outdoor temp — `HEAT_INGRESS_HEATING_SETPOINT_C` /
+  `HEAT_INGRESS_COOLING_SETPOINT_C`); splits the delta by 18°C outdoor temp
+  into cooling saving vs heating penalty. Constants in
   `config/settings.py` (`HEAT_INGRESS_*`, `COOLING_FRACTION`, COP) are
   unvalidated Melbourne defaults — the #1 roadmap item.
 
