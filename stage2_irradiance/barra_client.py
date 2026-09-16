@@ -85,6 +85,34 @@ logger = setup_logging("barra_client")
 # Connection test timeout in seconds — short so the pipeline fails fast.
 _CONNECTION_TIMEOUT_S = 8
 
+# OPeNDAP engines to try, in order of preference. netcdf4 wheels frequently
+# lack DAP support (or aren't installed at all); pydap is the pure-Python
+# fallback that works without it. Mirrors tools/fetch_heat_ingress_weather.py.
+_PREFERRED_ENGINES = ("pydap", "netcdf4")
+
+
+def _available_engines() -> tuple[str, ...]:
+    """Preferred OPeNDAP engines that xarray can actually use in this environment."""
+    try:
+        installed = set(xr.backends.list_engines())
+    except Exception:  # noqa: BLE001 - be permissive; fall back to the full list
+        installed = set(_PREFERRED_ENGINES)
+    engines = tuple(e for e in _PREFERRED_ENGINES if e in installed)
+    return engines or _PREFERRED_ENGINES
+
+
+def _open_remote_dataset(url: str) -> xr.Dataset:
+    """Open a remote BARRA2 OPeNDAP URL, trying each available xarray engine."""
+    last_err: Exception | None = None
+    for engine in _available_engines():
+        try:
+            return xr.open_dataset(url, engine=engine)
+        except Exception as exc:  # noqa: BLE001 - try the next engine
+            last_err = exc
+    raise RuntimeError(
+        f"Could not open {url} with engines {_available_engines()}: {last_err}"
+    )
+
 
 def _build_barra2_url(variable_key: str, year: int, month: int = 1) -> str:
     """
@@ -244,7 +272,7 @@ def fetch_barra_data(
                 "Fetching BARRA2 %s %d-%02d from OPeNDAP...", variable_key, year, month
             )
             try:
-                ds_remote = xr.open_dataset(url, engine="netcdf4")
+                ds_remote = _open_remote_dataset(url)
                 ds_point = ds_remote.sel(lat=lat, lon=lon, method="nearest")
                 ds_point = ds_point.load()
                 monthly_slices.append(ds_point)
