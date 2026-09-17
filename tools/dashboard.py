@@ -22,6 +22,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# `streamlit run` puts this file's directory on sys.path, not the project
+# root, so the project-root-relative imports below need it added explicitly.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import pandas as pd
 import streamlit as st
 
@@ -245,7 +251,7 @@ with tab_data:
     )
 
     rows = [_readiness_row(k) for k in suburb_keys]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     footprint_index = PROJECT_ROOT / "data/raw/footprints/buildings_index.gpkg"
     barra_hourly_samples = list(BARRA_DIR.glob("**/*"))
