@@ -576,6 +576,33 @@ analysed with:
 python tools/analyse_gemini_results.py Clayton
 ```
 
+## Dashboard
+
+A Streamlit control panel sits on top of the CLI pipeline — pick a suburb,
+see whether its tiles/footprints/outputs exist yet, run any stage as a
+subprocess (the same `python -m ...` command as below), and browse the
+resulting map/report/charts in the browser.
+
+```bash
+pip install -r requirements.txt   # includes streamlit
+streamlit run tools/dashboard.py
+```
+
+Tabs:
+
+- **Run pipeline** — buttons for Stage 1/2/3 and `tools.visualise_results`
+  for the selected suburb, with captured stdout/stderr shown after each run.
+- **Results** — per-building and per-m² headline metrics (per the Reporting
+  Basis in `CLAUDE.md`), the interactive map, summary charts, and a link to
+  the full HTML report, for whichever stage's output exists.
+- **Data status (all suburbs)** — a live table of tile/footprint/output
+  presence across every suburb in `config/suburbs.py`, so you can see at a
+  glance which suburbs are ready to run and which need tiles first.
+
+It only drives existing entry points (`run_stage1`/`run_stage2`/`run_stage3`/
+`visualise_results`) via subprocess — no pipeline logic lives in the
+dashboard itself.
+
 ## Running The Full Pipeline
 
 ```bash
@@ -855,6 +882,7 @@ Raising Rooves Model/
     analyse_gemini_results.py
     build_footprint_index.py
     compare_suburbs.py
+    dashboard.py              # Streamlit control panel (run stages, browse results)
     download_tiles.py        # fetch team-shared satellite tiles from Google Drive
     run_gemini_osm_experiment.py
     seasonal_analysis.py     # monthly cool-roof benefit/penalty + R_roof sweep

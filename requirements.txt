@@ -38,6 +38,7 @@ tqdm>=4.66
 # Visualisation
 folium>=0.15
 matplotlib>=3.8
+streamlit>=1.32
 
 # Dev / Testing
 pytest>=7.4
