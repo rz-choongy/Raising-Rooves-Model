@@ -1,5 +1,5 @@
 Material_type,Thickness_m,Density_Kg_m3,Spec_Heat_Cap_J_KgK,R_value_m2K_W,Layer_Role,Emissivity,Emissivity_cool
-Concrete,0.017140,1900,837,0.008687,outer_skin,0.9,0.875
+Terracotta,0.014926,1900,800,0.017769,outer_skin,0.9,0.880
 Cavity,0.6,1.2,1006,0.300,airspace,,
 Insulation,0.130,12,840,2.5,insulation,,
 Plaster,0.013,950,840,0.08125,inner_lining,,

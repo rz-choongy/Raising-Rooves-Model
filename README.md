@@ -384,7 +384,7 @@ Stage 2 appends these columns to the Stage 1 table:
 ## Running Stage 3
 
 Stage 3 runs a **transient 1-D finite-volume heat-ingress model** through a
-layered roof for every building (ported from `stage3_thermal/heat_ingress_model.ipynb`),
+layered roof for every building (ported from `stage3_thermal/Final_Heat_Ingress_Model.ipynb`),
 marching it once at the building's current solar absorptance and once at the
 cool-roof target, and differencing the plaster→interior heat flow.
 
@@ -392,6 +392,7 @@ cool-roof target, and differencing the plaster→interior heat flow.
 python -m stage3_thermal.run_stage3 --suburb "Carlton"
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --year 2007 --debug
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --weather-csv path/to/hourly.csv
+python -m stage3_thermal.run_stage3 --suburb "Carlton" --insulation-r-upgrade 4.1  # opt-in insulation-vs-coating comparison
 ```
 
 Prerequisites:
@@ -431,31 +432,45 @@ Output files:
 ### Stage 3 Model
 
 Per building, one forward-Euler finite-volume march (`dt ≈ 40 s`, clamped below
-the airspace-layer stability limit) through four layers, outer to inner.
-Boundary conditions:
+the airspace-layer stability limit) through four layers, outer to inner. Ported
+2026-09-19 from `Final_Heat_Ingress_Model.ipynb` (superseding the earlier
+`heat_ingress_model.ipynb`); see `DECISION_LOG.md` 2026-09-19. Boundary
+conditions:
 
 ```
-outer:  q = α·(rsdsdir + rsdsdif) + h_ext·(T_out − T_outer) + ε·σ·((T_out − 10)⁴ − T_outer⁴)
+outer:  q = α·(rsdsdir + rsdsdif) + h_ext·(T_out − T_outer) + ε·σ·(T_sky⁴ − T_outer⁴)
 h_ext:  5.7 + 3.8·V_local        (McAdams; V_local = BARRA2 10 m wind brought to roof height)
+T_sky:  Bliss (1961) dew-point + time-of-day clear-sky correlation (BARRA2 humidity)
+airspace faces (outer↔airspace, airspace↔insulation) and inner↔indoor:
+        EnergyPlus adaptive natural-convection h, direction-dependent on each
+        substep's ΔT (replaces a fixed cavity-R override and fixed internal-h)
 inner:  q = (T_inner − T_indoor) / (R_inner/2 + 1/h_i)
         T_indoor = 18 °C when T_out < 18 °C (heating setpoint), else 20 °C (cooling setpoint)
 ```
 
-**Two roof constructions are committed**, selected per building from
+**Four roof constructions are committed**, selected per building from
 `roof_material` (`stack_for_material()`):
 
-| `roof_material` | Stack | Layers (outer → inner) | CSV |
+| `roof_material` | Stack | Outer skin | CSV |
 | --- | --- | --- | --- |
-| `terracotta`, `concrete_tile` | tile | tile 15 mm → roof space 500 mm → insulation 164 mm → plaster 13 mm | `Input Tables/Tile_Roof.csv` |
-| everything else (metal, unknown, `"yes"`, …) | metal (default) | steel deck 0.42 mm → insulation 164 mm → cavity 300 mm → plaster 13 mm | `Input Tables/Regular_Roof.csv` |
+| `metal_dark`, `metal_light`, `metal`, `metal_sheet`, everything else unrecognised (unknown, `"yes"`, …) | metal (default) | steel 0.42 mm | `Input Tables/Regular_Roof.csv` |
+| `concrete_tile`, `roof_tiles` (ambiguous OSM tag) | concrete | concrete tile 17.1 mm | `Input Tables/Tile_Roof.csv` |
+| `terracotta` | terracotta | terracotta tile 14.9 mm | `Input Tables/Terracotta_Roof.csv` |
+| `slate` | slate | slate 6 mm | `Input Tables/Slate_Roof.csv` |
 
-Each CSV row carries a `Layer_Role` (`outer_skin` / `insulation` / `airspace` /
-`inner_lining`) — the model finds the airspace layer by role, not by position or
-name, so the tile stack can put its roof-space airgap directly under the tile
-(position 2) while the metal stack keeps its cavity third (position 3), and
-still share one solver. Buildings are grouped by stack and each group is
-marched (and its stability-checked `dt` computed) separately; Stage 3 output
-carries a `roof_construction` audit column (`"metal"` / `"tile"`) per building.
+Every stack shares the same inner layers (airspace 0.6 m, bulk insulation
+130 mm, plaster 13 mm) and layer order (outer_skin → airspace → insulation →
+inner_lining, airspace always at index 1) — concrete tile and terracotta no
+longer share one averaged "tile" construction, and metal/tile roofs no longer
+put the airspace in different positions. Per-building solar absorptance still
+comes from Stage 1's `absorptance_before`, not this table; only construction
+(thermal mass, R-value) and long-wave **emissivity** (current vs cool-roof
+coating — e.g. metal/concrete cool coating 0.875, tile/slate cool coating
+0.880; base emissivity is 0.9 for every material) are material-specific.
+Buildings are grouped by stack and each group is marched (and its
+stability-checked `dt` computed) separately; Stage 3 output carries a
+`roof_construction` audit column (`"metal"` / `"concrete"` / `"terracotta"` /
+`"slate"`) per building.
 
 The cool-roof saving is `march(α_before) − march(0.20)`, integrated per hour and
 split by that hour's outdoor temperature against the 18 °C cooling/heating base.
@@ -464,33 +479,61 @@ per-m² result × `roof_surface_area_m2`.
 
 | Parameter | Value | Source |
 | --- | --- | --- |
-| Airspace R (downward flow) | 0.23 m²·K/W | ISO 6946 unventilated airspace (notebook transient value) — same convention applied to both stacks' airspace layer |
+| Airspace face conductances | EnergyPlus adaptive natural convection (1.81/9.482 McAdams coefficients, direction-dependent) | Replaces the earlier fixed 0.23 m²·K/W downward-flow override |
 | Indoor heating / cooling setpoint | 18 °C / 20 °C, switched on outdoor temp | `HEAT_INGRESS_HEATING_SETPOINT_C` / `HEAT_INGRESS_COOLING_SETPOINT_C` — unvalidated Melbourne default |
 | Cooling / heating fraction | 0.70 / 0.70 | NatHERS 6-star Melbourne basis |
 | HVAC COP | 3.0 residential, 4.0 commercial | GEMS 2019 / AIRAH DA19 |
-| Sky temperature | `T_out − 10 K` | Notebook long-wave assumption |
+| Sky temperature | Bliss (1961) dew-point + time-of-day correlation | Replaces the earlier fixed `T_out − 10 K` assumption |
+| Roof tilt (airspace's outer-facing convection only) | 20° | `HEAT_INGRESS_ROOF_TILT_DEG` — single global value, like the reference notebook; not yet per-building `pitch_deg` |
+
+**Insulation-upgrade scenario (opt-in):** `--insulation-r-upgrade R_M2K_W`
+(optionally paired with `--insulation-thickness-upgrade THICKNESS_M`) marches
+a third column per building — same absorptance/emissivity as the current
+roof, insulation swapped to the given R-value/thickness — so the ceiling-
+insulation lever can be compared against the roof-coating lever on identical
+buildings and weather. Off by default; adds seven columns — always spelling
+out **thermal** (roof heat flux, before the cooling/heating-fraction and COP
+conversion) vs **electricity** (after it, what actually shows up as a
+saving) in the name, since `annual_benefit`'s equivalent columns are less
+consistent about this (only "heat" vs "electricity" distinguishes them):
+`roof_heat_ingress_insulation_kwh_m2_yr`,
+`insulation_cooling_saved_thermal_kwh_yr`,
+`insulation_heating_saved_thermal_kwh_yr`,
+`insulation_cooling_saved_electricity_kwh_yr`,
+`insulation_heating_saved_electricity_kwh_yr`,
+`insulation_net_electricity_saved_kwh_yr`, `insulation_net_co2_saved_kg_yr`.
+Unlike the cool-roof coating — which trades a summer cooling gain against a
+winter heating *penalty* (it also rejects wanted winter solar warmth) —
+better insulation only ever dampens conduction, so it saves energy in
+**both** seasons with no penalty side; `annual_benefit_insulation` in
+`heat_ingress_model.py` reflects that
+directly rather than reusing the cool-roof aggregation. `config.settings.
+INSULATION_UPGRADE_R_M2K_W` (4.1) / `INSULATION_UPGRADE_THICKNESS_M` (0.215)
+default to `Final_Heat_Ingress_Model.ipynb`'s own named "Insulation_new" row
+— a thicker batt of the committed stacks' own bulk material (density/heat
+capacity unchanged), not independently measured or tied to real per-building
+retrofit data, same status as `COOL_ROOF_ABSORPTANCE`. See `DECISION_LOG.md`
+2026-09-19.
 
 **Known limitations:**
 
-- Only `terracotta`/`concrete_tile` get their own construction; every other
-  `roof_material` (including `metal_light`, unknown, and OSM's generic `"yes"`)
-  still shares one metal-deck stack — the original single-stack behaviour, now
-  scoped rather than universal.
-- Terracotta and concrete tile share one stack (`Tile_Roof.csv`) — the two
-  materials differ enough in *absorptance* (handled in Stage 2) to matter more
-  than their construction difference, but that's a simplifying assumption, not
-  a measurement.
-- The roof-space airgap under tiles is modelled as an **unventilated** ISO 6946
-  airspace, the same as the metal stack's service cavity. A real tiled roof
-  space is usually ridge/eave-vented and would exchange heat with outdoor air
-  more readily than this model allows — not represented.
-- The 18 °C hourly cooling/heating split, the 0.70 demand fractions, the sky-
-  temperature depression and the McAdams `h_ext` correlation are standard
-  building-simulation defaults, not validated against Stuart's NatHERS runs.
+- Roof tilt for the airspace's outer-facing adaptive convection coefficient is
+  one global assumption (20°, matching the reference notebook), not Stage 1's
+  per-building `pitch_deg` — the notebook itself still scopes tilt this way.
+- `roof_tiles` (an ambiguous raw OSM tag distinct from the classifier's own
+  `concrete_tile`/`terracotta` output) falls back to the concrete stack.
+- The airspace is modelled as an **unventilated** gap for every material. A
+  real tiled roof space is usually ridge/eave-vented and would exchange heat
+  with outdoor air more readily than this model allows — not represented.
+- The 18 °C hourly cooling/heating split and the 0.70 demand fractions are
+  standard building-simulation defaults, not validated against Stuart's
+  NatHERS runs.
 - No separate heating COP — `HVAC_COP_*` is reused for the heating penalty.
 - `azimuth_deg` is carried through but numerically inert (`rsdsdir` is treated
   as already incidence-corrected); a per-plane incidence projection is future work.
-- One BARRA2 reference year (2007), suburb-uniform (`~11 km grid`).
+- One BARRA2 reference year (2007 by default), suburb-uniform (`~11 km grid`).
+  A single reference year materially moves the headline number — see
+  `DECISION_LOG.md` 2026-09-19 for a 2007-vs-2019 comparison across 14 suburbs.
 
 ## Visualisation
 
@@ -538,13 +581,17 @@ benefit — net annual effect is near zero.
 
 ### Heat Ingress Model Notebook
 
-`heat_ingress_model.ipynb` is a standalone transient (finite-volume) roof
-heat-ingress model — hourly heat flux through a layered roof for a single
-building, used to sanity-check the Stage 3 steady-state assumptions. It reads
-three CSVs from `Input Tables/` (next to the notebook, committed to the repo):
+`Final_Heat_Ingress_Model.ipynb` (superseding the earlier
+`heat_ingress_model.ipynb`, kept for history) is the standalone transient
+(finite-volume) roof heat-ingress model — hourly heat flux through a layered
+roof for a single building, five committed roof materials, and the reference
+for the physics `stage3_thermal/heat_ingress_model.py` ports (adaptive
+convection, dew-point sky temperature, per-material emissivity; see
+`DECISION_LOG.md` 2026-09-19). It reads its own `Roof_layers.csv` from a
+shared-drive `Input Tables/` folder (not committed — the pipeline's own
+committed `Input Tables/*.csv` carry the same values, see "Running Stage 3"
+above) plus:
 
-- `material_properties_table4.csv`, `Regular_Roof.csv` — roof layer / material
-  properties.
 - `barra2_{lat}_{lon}_{year}.csv` — a single-point hourly BARRA2 weather
   extract (`time_UTC, rsdsdir_Wm2, rsdsdif_Wm2, temp_K, rel_humidity_percent,
   wind_ms, rsds_total_Wm2, temp_C`).
@@ -708,16 +755,19 @@ conclusions.
 6. Stage 2 currently uses a single-year BARRA2 climate sample (2007); a proper
    30-year climate normal requires a longer run
    (`--start-year 1990 --end-year 2020`).
-7. Stage 3's transient model uses **one roof construction for every building**
-   (`Input Tables/Regular_Roof.csv`: steel deck / bulk insulation / ceiling
-   cavity / plaster). Only solar absorptance, pitch and area vary per building.
-   `roof_material` is not yet mapped to different layer stacks, and there is no
-   measured per-building construction data.
-8. Stage 3's demand fractions (0.70), the 18 °C cooling/heating hour split, the
-   `T_sky = T_out − 10 K` long-wave term, the McAdams `h_ext` correlation, and
+7. Stage 3's transient model uses four committed roof constructions (metal,
+   concrete tile, terracotta tile, slate — `Input Tables/*.csv`), selected per
+   building from `roof_material`; there is no measured per-building
+   construction data behind any of the four, and roof tilt (only used by the
+   airspace's outer-facing adaptive convection coefficient) is one global 20°
+   assumption, not Stage 1's per-building `pitch_deg`.
+8. Stage 3's demand fractions (0.70), the 18 °C cooling/heating hour split, and
    reusing one COP for both cooling and heating are standard building-simulation
    defaults, **not validated** against Stuart's NatHERS runs. It also uses a
-   single BARRA2 reference year (2007), suburb-uniform at ~11 km resolution.
+   single BARRA2 reference year (2007 by default), suburb-uniform at ~11 km
+   resolution — a 2007-vs-2019 comparison across 14 suburbs (`DECISION_LOG.md`
+   2026-09-19) found 9 of 14 suburbs show a *smaller* net benefit in 2019 than
+   2007 purely from the reference-year choice.
    `net_electricity_saved_kwh_yr` (cooling saving minus heating penalty) is the
    headline number; per the seasonal analysis the two roughly cancel in Melbourne.
 9. `--max-tiles` is not a reliable spatial smoke-test cap in the current Stage 1
@@ -733,18 +783,20 @@ Ranked by impact on the defensibility of the final FYP numbers.
 ### High Priority
 
 1. **Validate the Stage 3 heat-ingress model.** The transient model
-   (`stage3_thermal/heat_ingress_model.py`) is now per-building, but its inputs
-   are unvalidated: the single `Regular_Roof.csv` layer stack, the 18 °C
-   cooling/heating split, the 0.70 demand fractions, the `T_out − 10 K` sky
-   temperature, the McAdams `h_ext`, and one COP for both cooling and heating.
+   (`stage3_thermal/heat_ingress_model.py`) is now per-building across four
+   roof constructions, but its inputs are unvalidated: the four `Input
+   Tables/*.csv` layer stacks, the 18 °C cooling/heating split, the 0.70
+   demand fractions, and one COP for both cooling and heating. The sky
+   temperature (Bliss dew-point correlation) and airspace/indoor convection
+   (EnergyPlus adaptive coefficients) are more physically grounded than the
+   earlier fixed assumptions but still unvalidated against measured roof data.
    Validate against Stuart's NatHERS runs / AS-NZS 4859.1 and publish a
    sensitivity analysis (all constants live in `config/settings.py`).
-2. **Extend per-material roof construction.** Terracotta/concrete tile now get
-   a dedicated stack (below); metal-deck is still the default for everything
-   else, including OSM's generic `"yes"` and unclassified buildings. Add more
-   stacks (e.g. skillion vs pitched-with-ceiling framing) and consider
-   splitting terracotta from concrete tile if construction, not just
-   absorptance, turns out to matter.
+2. **Integrate per-building roof pitch into Stage 3.** The airspace's
+   outer-facing adaptive convection coefficient uses one global tilt
+   (`HEAT_INGRESS_ROOF_TILT_DEG`, 20°) rather than Stage 1's per-building
+   `pitch_deg` — matching the reference notebook's own scoping, but a real gap
+   given the data already exists.
 3. **True suburb boundaries.** Replace rectangular bboxes with ABS SA2
    polygons, add an `inside_suburb` flag, report canonical in-boundary totals,
    and draw the boundary on annotations.
@@ -761,15 +813,21 @@ Ranked by impact on the defensibility of the final FYP numbers.
 7. Validate the absorptance lookup against local building stock data.
 8. Give the model a floating indoor dead-band (currently a two-point 18 °C
    heating / 20 °C cooling setpoint switched on outdoor temp, not a real
-   thermostat cycle) and a direction-dependent cavity resistance (0.23 down /
-   0.16 up).
+   thermostat cycle).
 
 ### Done
 
+- **Stage 3 model ported from Final_Heat_Ingress_Model.ipynb** — Sep 2026.
+  Four distinct roof constructions (metal, concrete tile, terracotta tile,
+  slate — each with its own emissivity, current vs cool-roof); a Bliss (1961)
+  dew-point + time-of-day sky-temperature correlation replacing the fixed
+  `T_out − 10 K` assumption; EnergyPlus adaptive natural-convection
+  coefficients for the airspace and indoor faces replacing the fixed cavity-R
+  override and fixed internal-h constant. See `DECISION_LOG.md` 2026-09-19.
 - **Per-material roof construction for Stage 3** — Sep 2026. Terracotta and
-  concrete tile roofs now march a dedicated tile-on-batten stack
-  (`Input Tables/Tile_Roof.csv`) instead of being forced onto the metal-deck
-  construction; `roof_construction` audit column added. See `DECISION_LOG.md`.
+  concrete tile roofs now march their own dedicated stacks instead of being
+  forced onto the metal-deck construction; `roof_construction` audit column
+  added. See `DECISION_LOG.md`.
 - **Stage 3 rebuilt as a per-building transient heat-ingress model** — Sep 2026.
   Replaces the inferred-R_roof algebraic calculator; marches the layered-roof
   model at current vs cool absorptance over a full year of hourly BARRA2

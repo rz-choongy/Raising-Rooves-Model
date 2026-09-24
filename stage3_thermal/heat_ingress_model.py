@@ -1,22 +1,33 @@
 """
 Transient roof heat-ingress model for Stage 3 — vectorised across buildings.
 
-This is the pipeline engine ported from ``stage3_thermal/heat_ingress_model.ipynb``
-(the single-building reference). It marches a 1-D forward-Euler finite-volume
+This is the pipeline engine ported from
+``stage3_thermal/Final_Heat_Ingress_Model.ipynb`` (the single-building
+reference; port 2026-09-19, superseding the earlier
+``heat_ingress_model.ipynb``). It marches a 1-D forward-Euler finite-volume
 conduction model through a layered roof:
 
-    outside air ──[h_ext + shortwave + long-wave]── outer skin ── insulation
-      ── airspace ── inner lining ──[h_internal]── indoor air (fixed setpoint)
+    outside air ──[h_ext + shortwave + long-wave]── outer skin ── airspace
+      ── insulation ── inner lining ──[adaptive h]── indoor air (fixed setpoint)
 
-Two roof constructions are committed (``RoofStack``, ``load_roof_layers``):
-steel deck / bulk insulation / cavity / plaster (default), and terracotta or
-concrete tile / roof space / bulk insulation / plaster. ``stack_for_material``
-picks per building from its ``roof_material``.
+Four roof constructions are committed (``RoofStack``, ``load_roof_layers``):
+steel deck (default), concrete tile, terracotta tile, and slate — each with its
+own outer-skin thickness/density/heat-capacity/R-value/emissivity.
+``stack_for_material`` picks per building from its ``roof_material``.
 
 The notebook loops one building at a time; here ``MidTemps`` is a ``(layers,
 buildings)`` array so every building sharing a roof construction is marched in
 lockstep. The method, timestep, and equations are identical — only the
 per-building Python loop is removed.
+
+Two physics decisions came from the final notebook port:
+  * Sky temperature uses a dew-point + time-of-day clear-sky correlation
+    (Bliss 1961), not a fixed ``T_air - 10 K`` offset.
+  * The airspace layer's two face conductances (outer skin↔airspace,
+    airspace↔insulation) use EnergyPlus adaptive natural-convection
+    coefficients (direction-dependent on the instantaneous ΔT each substep),
+    as does the inner lining→indoor face — replacing the previous fixed
+    cavity-R override and fixed internal-h constant.
 
 Stage 3 cool-roof saving per building = march the model at the building's current
 solar absorptance and again at ``COOL_ROOF_ABSORPTANCE``, then difference the
@@ -24,12 +35,23 @@ plaster→interior heat flow. Hours with outdoor temp ≥ ``CDD_BASE_TEMP`` coun
 avoided heat as a cooling-season saving; colder hours count it as a heating-season
 penalty (the cool roof also rejects wanted winter solar gain).
 
+An optional, opt-in insulation-upgrade scenario (``run_model``'s
+``insulation_r_upgrade_m2k_w`` / ``insulation_thickness_upgrade_m``) marches a
+third column per building at the same absorptance/emissivity but a different
+insulation R-value/thickness, so the ceiling-insulation lever can be compared
+against the roof-coating lever. Unlike absorptance, higher insulation
+resistance only ever dampens conduction — it saves energy in both seasons,
+never trades one off against the other — so it gets its own aggregation,
+``annual_benefit_insulation``, rather than reusing ``annual_benefit``'s
+summer-gain/winter-penalty framing.
+
 Weather is uniform across a suburb (BARRA2 ~11 km grid) and hourly; wind → h_ext
 is recomputed every hour.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,15 +82,19 @@ from config.settings import (
     H_OUT_WIND_SLOPE_W_M2K_PER_MS,
     HEAT_INGRESS_COOLING_SETPOINT_C,
     HEAT_INGRESS_HEATING_SETPOINT_C,
-    HEAT_INGRESS_INTERNAL_H_W_M2K,
     HEAT_INGRESS_ROOF_EMISSIVITY,
     HEAT_INGRESS_ROOF_HEIGHT_M,
+    HEAT_INGRESS_ROOF_TILT_DEG,
     HEAT_INGRESS_SOLVER_DT_S,
     HEAT_INGRESS_SPINUP_HOURS,
     HEATING_FRACTION,
     HVAC_COP_COMMERCIAL,
     HVAC_COP_RESIDENTIAL,
+    INSULATION_UPGRADE_R_M2K_W,
+    INSULATION_UPGRADE_THICKNESS_M,
     ROOF_LAYERS_CSV,
+    ROOF_LAYERS_SLATE_CSV,
+    ROOF_LAYERS_TERRACOTTA_CSV,
     ROOF_LAYERS_TILE_CSV,
 )
 from shared.logging_config import setup_logging
@@ -79,9 +105,13 @@ logger = setup_logging("heat_ingress_model")
 _STEFAN_BOLTZMANN_W_M2K4 = 5.6703e-8
 _KELVIN = 273.15
 
-# Sky temperature for the long-wave term, following the notebook's transient
-# cell: T_sky ≈ T_air − 10 K (the "TSky = Tair - (10 to 20) K" assumption).
-_SKY_DEPRESSION_K = 10.0
+# Clear-sky temperature (Bliss 1961 dew-point correlation), replacing the
+# earlier fixed T_sky = T_air - 10 K assumption. A1/B1 are the Magnus dew-point
+# approximation constants; the 0.013*cos(15°*hour) term is the diurnal
+# correction (period 24 h). From Final_Heat_Ingress_Model.ipynb.
+_DEWPOINT_A = 17.625
+_DEWPOINT_B = 243.04
+_DEG_TO_RAD = math.pi / 180.0
 
 # Wind-speed height correction (BARRA2 10 m wind → roof height), EnergyPlus
 # Eq. 3.84. Met station = open country; site = towns/cities. From notebook cell
@@ -92,11 +122,16 @@ _MET_DELTA_M = 270.0
 _SITE_ALPHA = 0.33
 _SITE_DELTA_M = 460.0
 
-# ISO 6946 thermal resistance for the 0.3 m unventilated ceiling cavity under
-# downward (summer) heat flow. The notebook's transient run uses this in place
-# of the nominal CSV value; a direction-dependent switch (0.16 upward) is a
-# documented follow-up. Set to None to keep the CSV value instead.
-CAVITY_R_DOWNWARD_M2K_W = 0.23
+# EnergyPlus natural-convection correlations (McAdams-derived; Eq. 3.155
+# upward / 3.156 downward heat flow) driving the airspace layer's two face
+# conductances and the inner-lining→indoor face — replacing the previous fixed
+# cavity-R override and fixed internal-h constant. From
+# Final_Heat_Ingress_Model.ipynb's "Calculating initial midpoint temp" /
+# transient cells.
+_NATURAL_CONV_DOWN_COEFF = 1.81
+_NATURAL_CONV_UP_COEFF = 9.482
+_NATURAL_CONV_DOWN_BASE = 1.382
+_NATURAL_CONV_UP_BASE = 7.238
 
 # Building types billed as commercial: different HVAC COP. Ported from the
 # retired thermal_calculator.
@@ -120,13 +155,14 @@ def hvac_cop(building_type) -> float:
 
 
 # ── Roof construction ────────────────────────────────────────────────────────
-# A roof stack is exactly 4 conduction layers, outermost first. The physics
-# (march_interior_flux) treats every layer identically -- what differs between
-# a metal-deck roof and a tile roof is the property VALUES in each layer, not
-# the equations. One row must carry Layer_Role="airspace" (the layer whose
-# R gets the direction-dependent downward/upward override, and the one used
-# for the conservative stability check) -- for both stacks shipped today that's
-# the roof cavity / roof-space layer, but it need not be a fixed position.
+# A roof stack is exactly 4 conduction layers, outermost first: outer_skin,
+# airspace, insulation, inner_lining -- every committed CSV uses this order, so
+# the airspace layer's Layer_Role=="airspace" row must sit at index 1
+# (march_interior_flux enforces this). Its two neighbouring face conductances
+# use adaptive natural convection rather than the row's own R-value (see
+# march_interior_flux); the other two committed materials (metal/tile) used
+# different cavity positions before this port -- now standardised so every
+# stack shares the same physics.
 _VALID_LAYER_ROLES = frozenset({"outer_skin", "insulation", "airspace", "inner_lining"})
 
 
@@ -140,6 +176,8 @@ class RoofStack:
     heat_capacity_j_kgk: np.ndarray
     r_value_m2k_w: np.ndarray
     cavity_index: int  # position of the Layer_Role == "airspace" row
+    emissivity: float  # outer-skin long-wave emissivity, current absorptance
+    emissivity_cool: float  # outer-skin long-wave emissivity, cool-roof coating
 
     @property
     def areal_heat_capacity_j_m2k(self) -> np.ndarray:
@@ -147,23 +185,26 @@ class RoofStack:
         return self.density_kg_m3 * self.heat_capacity_j_kgk * self.thickness_m
 
 
-def load_roof_layers(
-    csv_path: str | Path | None = None,
-    *,
-    cavity_r_m2k_w: float | None = CAVITY_R_DOWNWARD_M2K_W,
-) -> RoofStack:
+def load_roof_layers(csv_path: str | Path | None = None) -> RoofStack:
     """
     Load a roof layer stack from a 4-row, outer-to-inner layer CSV.
 
     Columns: ``Material_type, Thickness_m, Density_Kg_m3, Spec_Heat_Cap_J_KgK,
-    R_value_m2K_W, Layer_Role``. Rows are used in file order (outer -> inner);
-    exactly one row must have ``Layer_Role == "airspace"``.
+    R_value_m2K_W, Layer_Role``, plus optional ``Emissivity, Emissivity_cool``
+    on the outer_skin row (falls back to ``config.settings.
+    HEAT_INGRESS_ROOF_EMISSIVITY`` for both when absent). Rows are used in file
+    order (outer -> inner); exactly one row must have
+    ``Layer_Role == "airspace"``.
+
+    The airspace layer's own R-value is carried for reference only — the
+    transient march replaces both of its face conductances with adaptive
+    natural-convection coefficients (see ``march_interior_flux``), so this
+    value no longer participates in conduction directly. It still bounds
+    ``max_stable_timestep``'s worst case.
 
     Args:
         csv_path: CSV path. Defaults to ``config.settings.ROOF_LAYERS_CSV``
             (the metal-deck stack).
-        cavity_r_m2k_w: Override for the airspace layer's R-value (see
-            ``CAVITY_R_DOWNWARD_M2K_W``). ``None`` keeps the CSV value.
     """
     path = Path(csv_path) if csv_path is not None else Path(ROOF_LAYERS_CSV)
     df = pd.read_csv(path)
@@ -180,34 +221,55 @@ def load_roof_layers(
     if len(airspace_rows) != 1:
         raise ValueError(f"{path} must have exactly one Layer_Role=='airspace' row.")
     cavity_index = airspace_rows[0]
+    outer_row = roles.index("outer_skin")
 
-    r_values = df["R_value_m2K_W"].to_numpy(float)
-    if cavity_r_m2k_w is not None:
-        r_values = r_values.copy()
-        r_values[cavity_index] = float(cavity_r_m2k_w)
+    if "Emissivity" in df.columns and pd.notna(df["Emissivity"].iloc[outer_row]):
+        emissivity = float(df["Emissivity"].iloc[outer_row])
+    else:
+        emissivity = HEAT_INGRESS_ROOF_EMISSIVITY
+    if "Emissivity_cool" in df.columns and pd.notna(df["Emissivity_cool"].iloc[outer_row]):
+        emissivity_cool = float(df["Emissivity_cool"].iloc[outer_row])
+    else:
+        emissivity_cool = HEAT_INGRESS_ROOF_EMISSIVITY
 
     return RoofStack(
         layer_names=tuple(df["Material_type"].str.strip()),
         thickness_m=df["Thickness_m"].to_numpy(float),
         density_kg_m3=df["Density_Kg_m3"].to_numpy(float),
         heat_capacity_j_kgk=df["Spec_Heat_Cap_J_KgK"].to_numpy(float),
-        r_value_m2k_w=r_values,
+        r_value_m2k_w=df["R_value_m2K_W"].to_numpy(float),
         cavity_index=cavity_index,
+        emissivity=emissivity,
+        emissivity_cool=emissivity_cool,
     )
 
 
-# Which committed stack a building's roof_material maps to. Anything not
-# listed here (metal, unknown, "yes", ...) uses the default metal-deck stack —
-# scoped deliberately: only terracotta/concrete tile get their own construction
-# for now (see DECISION_LOG). Both tile materials share ROOF_LAYERS_TILE_CSV;
-# they differ enough in absorptance (handled in Stage 2) but not in construction
-# to justify separate stacks yet.
-_TILE_ROOF_MATERIALS = frozenset({"terracotta", "concrete_tile"})
+# Which committed stack a building's roof_material maps to. Four materials now
+# have their own construction (thickness/density/heat-capacity/R-value/
+# emissivity) ported from Final_Heat_Ingress_Model.ipynb's Roof_layers table —
+# concrete tile and terracotta tile no longer share one averaged "tile" stack.
+# `roof_tiles` (an ambiguous raw OSM tag, not the classifier's own output) falls
+# back to concrete tile, the more common of the two by a wide margin. Anything
+# else unrecognised (`other`, `None`, stray raw OSM values like `metal`/
+# `metal_sheet`/`glass`/`wood`) uses the default metal-deck stack, unchanged
+# from before — per-building solar absorptance still comes from
+# `absorptance_before`, not this table, so an unrecognised material only loses
+# construction-level fidelity (thermal mass, emissivity), not absorptance.
+_MATERIAL_STACK_MAP = {
+    "metal_dark": "metal",
+    "metal_light": "metal",
+    "metal": "metal",
+    "metal_sheet": "metal",
+    "concrete_tile": "concrete",
+    "roof_tiles": "concrete",
+    "terracotta": "terracotta",
+    "slate": "slate",
+}
 
 
 def stack_for_material(roof_material) -> str:
-    """Return 'tile' or 'metal' -- which committed roof stack a material uses."""
-    return "tile" if _normalize_label(roof_material) in _TILE_ROOF_MATERIALS else "metal"
+    """Return which committed roof stack ('metal'/'concrete'/'terracotta'/'slate') a material uses."""
+    return _MATERIAL_STACK_MAP.get(_normalize_label(roof_material), "metal")
 
 
 # ── Weather preparation ──────────────────────────────────────────────────────
@@ -219,6 +281,8 @@ class HourlyWeather:
     outdoor_temp_c: np.ndarray          # (H,)
     shortwave_incident_w_m2: np.ndarray  # (H,) direct + diffuse on the roof
     h_ext_w_m2k: np.ndarray             # (H,) outdoor surface film coeff
+    humidity_percent: np.ndarray        # (H,) relative humidity, for T_sky
+    hour_of_day: np.ndarray             # (H,) local hour 0-23, for T_sky's diurnal term
 
     @property
     def n_hours(self) -> int:
@@ -234,7 +298,8 @@ def build_hourly_weather(
     Turn a raw BARRA2 hourly CSV/frame into model forcing arrays.
 
     Expected columns (``tools.fetch_heat_ingress_weather`` schema):
-    ``time_UTC, rsdsdir_Wm2, rsdsdif_Wm2, temp_C, wind_ms`` (others ignored).
+    ``time_UTC, rsdsdir_Wm2, rsdsdif_Wm2, temp_C, wind_ms,
+    rel_humidity_percent`` (others ignored).
     """
     z = float(roof_height_m if roof_height_m is not None else HEAT_INGRESS_ROOF_HEIGHT_M)
 
@@ -260,25 +325,38 @@ def build_hourly_weather(
         outdoor_temp_c=df["temp_C"].astype(float).to_numpy(),
         shortwave_incident_w_m2=incident,
         h_ext_w_m2k=h_ext,
+        humidity_percent=df["rel_humidity_percent"].astype(float).to_numpy(),
+        hour_of_day=(time_melb.dt.hour + time_melb.dt.minute / 60.0).to_numpy(dtype=float),
     )
 
 
 # ── Stability ────────────────────────────────────────────────────────────────
-def max_stable_timestep(
-    stack: RoofStack,
-    h_ext_max_w_m2k: float,
-    internal_h_w_m2k: float = HEAT_INGRESS_INTERNAL_H_W_M2K,
-) -> float:
+def max_stable_timestep(stack: RoofStack, h_ext_max_w_m2k: float) -> float:
     """
     Largest forward-Euler timestep (s) that keeps every layer's update stable.
 
-    Port of the notebook's stability cell, evaluated with the most conservative
-    (lowest) cavity resistance and the peak h_ext over the whole weather series.
+    Port of the notebook's stability cell (cell 19): evaluated with the peak
+    h_ext over the whole weather series, and the worst-case (largest) adaptive
+    natural-convection coefficients the airspace/indoor faces could reach,
+    assuming a conservative 5 K driving temperature difference — the same
+    bound Final_Heat_Ingress_Model.ipynb uses before marching.
     """
-    r = stack.r_value_m2k_w.copy()
-    r[stack.cavity_index] = min(r[stack.cavity_index], 0.16)
+    r = stack.r_value_m2k_w
+    cav = stack.cavity_index
+
+    delta_t_max = 5.0  # K; matches the notebook's conservative timestep check
+    h_up = _NATURAL_CONV_UP_COEFF * delta_t_max ** (1.0 / 3.0)
+    cos_tilt = abs(math.cos(math.radians(HEAT_INGRESS_ROOF_TILT_DEG)))
+    h_tilted_max = h_up / (_NATURAL_CONV_UP_BASE - cos_tilt)  # outer_skin <-> airspace
+    h_horizontal_max = h_up / (_NATURAL_CONV_UP_BASE - 1.0)  # airspace <-> next layer; inner -> indoor
+
     face_conductance = 2.0 / (r[:-1] + r[1:])
-    inner_conductance = 1.0 / (r[-1] / 2.0 + 1.0 / internal_h_w_m2k)
+    if cav - 1 >= 0:
+        face_conductance[cav - 1] = 1.0 / (r[cav - 1] / 2.0 + 1.0 / h_tilted_max)
+    if cav <= len(r) - 2:
+        face_conductance[cav] = 1.0 / (1.0 / h_horizontal_max + r[cav + 1] / 2.0)
+
+    inner_conductance = 1.0 / (r[-1] / 2.0 + 1.0 / h_horizontal_max)
     conductance_sum = np.concatenate(
         [
             [h_ext_max_w_m2k + face_conductance[0]],
@@ -325,104 +403,218 @@ def _march_kernel(
     temp_k,          # (H,)
     incident,        # (H,)
     h_ext,           # (H,)
+    humidity,        # (H,) relative humidity %, for the T_sky correlation
+    hour_of_day,     # (H,) local hour 0-23 at each weather timestamp
     absorptance,     # (B,)
-    r0, r1, r2, r3,  # layer resistances
-    cap0, cap1, cap2, cap3,  # areal heat capacities ρ·Cp·t
+    emissivity,      # (B,) outer-skin emissivity -- current vs cool-roof coating
+    r0, r2, r3,      # outer_skin resistance (scalar); insulation resistance (B,) -- per-scenario upgrade; inner_lining (scalar)
+    cap0, cap1, cap2, cap3,  # areal heat capacities rho*Cp*t: outer/airspace/inner_lining scalar, insulation (B,) per-scenario upgrade
     dt,
     substeps,
-    internal_h,
     heating_setpoint_k,
     cooling_setpoint_k,
-    rad_coeff,
-    sky_dep,
+    cos_tilt,        # |cos(roof tilt)|, outer_skin<->airspace face only
     mid_init,        # (4, B)
     out,             # (H-1, B)
 ):
     n_intervals = temp_k.shape[0] - 1
     n_buildings = absorptance.shape[0]
-    fr0 = r0 + r1
-    fr1 = r1 + r2
-    fr2 = r2 + r3
-    inner_denom = r3 / 2.0 + 1.0 / internal_h
     dt_over_3600 = dt / 3600.0
     denom_frac = 1.0 / (substeps - 1) if substeps > 1 else 0.0
 
+    # Weather is suburb-uniform -- every one of these per-substep quantities
+    # (interpolated temp/incident/wind and the sky temperature, the latter a
+    # log + cos + fractional power) is identical for every building. Compute
+    # each substep ONCE here rather than once per (building, substep) pair --
+    # with thousands of buildings per material group, marching them inside
+    # the building loop below repeated this transcendental math thousands of
+    # times over for no reason.
+    total_substeps = n_intervals * substeps
+    t_out_series = np.empty(total_substeps)
+    inc_series = np.empty(total_substeps)
+    hx_series = np.empty(total_substeps)
+    sky_series = np.empty(total_substeps)
+    t_inside_series = np.empty(total_substeps)
+    idx = 0
+    for h in range(n_intervals):
+        t0 = temp_k[h]
+        dt_out = temp_k[h + 1] - t0
+        s0 = incident[h]
+        d_inc = incident[h + 1] - s0
+        he0 = h_ext[h]
+        d_he = h_ext[h + 1] - he0
+        rh0 = humidity[h]
+        d_rh = humidity[h + 1] - rh0
+        t_day0 = hour_of_day[h]
+        for s in range(substeps):
+            f = s * denom_frac
+            t_out = t0 + dt_out * f
+            rh = rh0 + d_rh * f
+
+            # Clear-sky temperature (Bliss 1961 dew-point correlation).
+            t_air_c = t_out - 273.15
+            humidity_term = math.log(rh / 100.0) + (_DEWPOINT_A * t_air_c) / (_DEWPOINT_B + t_air_c)
+            t_dp_c = _DEWPOINT_B * humidity_term / (_DEWPOINT_A - humidity_term)
+            t_local = t_day0 + f
+            sky = t_out * (
+                0.711 + 0.0056 * t_dp_c + 0.000073 * t_dp_c * t_dp_c
+                + 0.013 * math.cos(_DEG_TO_RAD * 15.0 * t_local)
+            ) ** 0.25
+
+            t_out_series[idx] = t_out
+            inc_series[idx] = s0 + d_inc * f
+            hx_series[idx] = he0 + d_he * f
+            sky_series[idx] = sky
+            t_inside_series[idx] = heating_setpoint_k if t_out < heating_setpoint_k else cooling_setpoint_k
+            idx += 1
+
     for b in prange(n_buildings):
         a = absorptance[b]
+        rad_coeff = emissivity[b] * _STEFAN_BOLTZMANN_W_M2K4
+        r2_b = r2[b]
+        cap2_b = cap2[b]
+        fr2 = r2_b + r3
         m0 = mid_init[0, b]
         m1 = mid_init[1, b]
         m2 = mid_init[2, b]
         m3 = mid_init[3, b]
         for h in range(n_intervals):
-            t0 = temp_k[h]
-            dt_out = temp_k[h + 1] - t0
-            s0 = incident[h]
-            d_inc = incident[h + 1] - s0
-            he0 = h_ext[h]
-            d_he = h_ext[h + 1] - he0
             acc = 0.0
+            base_idx = h * substeps
             for s in range(substeps):
-                f = s * denom_frac
-                t_out = t0 + dt_out * f
-                inc = s0 + d_inc * f
-                hx = he0 + d_he * f
-                sky = t_out - sky_dep
-                t_inside_k = heating_setpoint_k if t_out < heating_setpoint_k else cooling_setpoint_k
+                idx = base_idx + s
+                t_out = t_out_series[idx]
+                inc = inc_series[idx]
+                hx = hx_series[idx]
+                sky = sky_series[idx]
+                t_inside_k = t_inside_series[idx]
 
                 q_outer = (
                     a * inc
                     + hx * (t_out - m0)
                     + rad_coeff * (sky * sky * sky * sky - m0 * m0 * m0 * m0)
                 )
-                qf0 = 2.0 * (m0 - m1) / fr0
-                qf1 = 2.0 * (m1 - m2) / fr1
+
+                # Adaptive natural convection: outer_skin <-> airspace (tilted).
+                delta_a = m0 - m1
+                abs_da = abs(delta_a)
+                if delta_a >= 0.0:
+                    h_cav_a = _NATURAL_CONV_DOWN_COEFF * abs_da ** (1.0 / 3.0) / (_NATURAL_CONV_DOWN_BASE + cos_tilt)
+                else:
+                    h_cav_a = _NATURAL_CONV_UP_COEFF * abs_da ** (1.0 / 3.0) / (_NATURAL_CONV_UP_BASE - cos_tilt)
+                qf0 = delta_a / (r0 / 2.0 + 1.0 / h_cav_a)
+
+                # Adaptive natural convection: airspace <-> insulation (horizontal).
+                delta_b = m1 - m2
+                abs_db = abs(delta_b)
+                if delta_b >= 0.0:
+                    h_cav_b = _NATURAL_CONV_DOWN_COEFF * abs_db ** (1.0 / 3.0) / (_NATURAL_CONV_DOWN_BASE + 1.0)
+                else:
+                    h_cav_b = _NATURAL_CONV_UP_COEFF * abs_db ** (1.0 / 3.0) / (_NATURAL_CONV_UP_BASE - 1.0)
+                qf1 = delta_b / (1.0 / h_cav_b + r2_b / 2.0)
+
                 qf2 = 2.0 * (m2 - m3) / fr2
-                q_inner = (m3 - t_inside_k) / inner_denom
+
+                # Adaptive natural convection: inner_lining <-> indoor (horizontal).
+                delta_c = m3 - t_inside_k
+                abs_dc = abs(delta_c)
+                if delta_c >= 0.0:
+                    hi = _NATURAL_CONV_DOWN_COEFF * abs_dc ** (1.0 / 3.0) / (_NATURAL_CONV_DOWN_BASE + 1.0)
+                else:
+                    hi = _NATURAL_CONV_UP_COEFF * abs_dc ** (1.0 / 3.0) / (_NATURAL_CONV_UP_BASE - 1.0)
+                q_inner = delta_c / (r3 / 2.0 + 1.0 / hi)
 
                 acc += q_inner * dt_over_3600
 
                 m0 += dt * (q_outer - qf0) / cap0
                 m1 += dt * (qf0 - qf1) / cap1
-                m2 += dt * (qf1 - qf2) / cap2
+                m2 += dt * (qf1 - qf2) / cap2_b
                 m3 += dt * (qf2 - q_inner) / cap3
             out[h, b] = acc
 
 
 def _march_numpy(
-    temp_k, incident, h_ext, absorptance, r_values, areal_capacity,
-    dt, substeps, internal_h, heating_setpoint_k, cooling_setpoint_k,
-    rad_coeff, sky_dep, mid,
+    temp_k, incident, h_ext, humidity, hour_of_day,
+    absorptance, emissivity, r0, r2, r3, cap0, cap1, cap2, cap3,
+    dt, substeps, heating_setpoint_k, cooling_setpoint_k,
+    cos_tilt, mid,
 ):
+    # r2/cap2 may be scalar (shared insulation) or (B,) (per-scenario
+    # insulation upgrade) -- numpy broadcasting handles both transparently.
     n_intervals = temp_k.shape[0] - 1
-    n_layers = mid.shape[0]
-    face_r = (r_values[:-1] + r_values[1:])[:, None]
-    inner_denom = r_values[-1] / 2.0 + 1.0 / internal_h
-    cap = areal_capacity[:, None]
+    fr2 = r2 + r3
+    rad_coeff = emissivity * _STEFAN_BOLTZMANN_W_M2K4
     frac = np.linspace(0.0, 1.0, substeps)
     out = np.zeros((n_intervals, absorptance.size), dtype=float)
 
-    for hour in range(n_intervals):
-        t_out = temp_k[hour] + (temp_k[hour + 1] - temp_k[hour]) * frac
-        inc = incident[hour] + (incident[hour + 1] - incident[hour]) * frac
-        hx = h_ext[hour] + (h_ext[hour + 1] - h_ext[hour]) * frac
-        acc = np.zeros(absorptance.size)
-        for s in range(substeps):
-            sky = t_out[s] - sky_dep
-            t_inside_k = heating_setpoint_k if t_out[s] < heating_setpoint_k else cooling_setpoint_k
-            q_outer = (
-                absorptance * inc[s]
-                + hx[s] * (t_out[s] - mid[0])
-                + rad_coeff * (sky * sky * sky * sky - mid[0] * mid[0] * mid[0] * mid[0])
-            )
-            q_face = 2.0 * (mid[:-1] - mid[1:]) / face_r
-            q_inner = (mid[-1] - t_inside_k) / inner_denom
-            acc += q_inner * dt / 3600.0
-            net = np.empty((n_layers, absorptance.size))
-            net[0] = q_outer - q_face[0]
-            net[1:-1] = q_face[:-1] - q_face[1:]
-            net[-1] = q_face[-1] - q_inner
-            mid += dt * net / cap
-        out[hour] = acc
+    # An exact zero delta_T (h_cav/hi -> 0, face resistance -> inf) is a real,
+    # correctly-handled physical state (no convective coupling -> no flux
+    # through that face), not an error -- suppress the benign warning.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for hour in range(n_intervals):
+            t_out_arr = temp_k[hour] + (temp_k[hour + 1] - temp_k[hour]) * frac
+            inc_arr = incident[hour] + (incident[hour + 1] - incident[hour]) * frac
+            hx_arr = h_ext[hour] + (h_ext[hour + 1] - h_ext[hour]) * frac
+            rh_arr = humidity[hour] + (humidity[hour + 1] - humidity[hour]) * frac
+            t_day0 = hour_of_day[hour]
+            acc = np.zeros(absorptance.size)
+            for s in range(substeps):
+                t_out = t_out_arr[s]
+                inc = inc_arr[s]
+                hx = hx_arr[s]
+                rh = rh_arr[s]
+
+                t_air_c = t_out - 273.15
+                humidity_term = math.log(rh / 100.0) + (_DEWPOINT_A * t_air_c) / (_DEWPOINT_B + t_air_c)
+                t_dp_c = _DEWPOINT_B * humidity_term / (_DEWPOINT_A - humidity_term)
+                t_local = t_day0 + frac[s]
+                sky = t_out * (
+                    0.711 + 0.0056 * t_dp_c + 0.000073 * t_dp_c ** 2
+                    + 0.013 * math.cos(_DEG_TO_RAD * 15.0 * t_local)
+                ) ** 0.25
+                t_inside_k = heating_setpoint_k if t_out < heating_setpoint_k else cooling_setpoint_k
+
+                q_outer = (
+                    absorptance * inc
+                    + hx * (t_out - mid[0])
+                    + rad_coeff * (sky ** 4 - mid[0] ** 4)
+                )
+
+                delta_a = mid[0] - mid[1]
+                abs_da = np.abs(delta_a)
+                h_cav_a = np.where(
+                    delta_a >= 0.0,
+                    _NATURAL_CONV_DOWN_COEFF * abs_da ** (1.0 / 3.0) / (_NATURAL_CONV_DOWN_BASE + cos_tilt),
+                    _NATURAL_CONV_UP_COEFF * abs_da ** (1.0 / 3.0) / (_NATURAL_CONV_UP_BASE - cos_tilt),
+                )
+                qf0 = delta_a / (r0 / 2.0 + 1.0 / h_cav_a)
+
+                delta_b = mid[1] - mid[2]
+                abs_db = np.abs(delta_b)
+                h_cav_b = np.where(
+                    delta_b >= 0.0,
+                    _NATURAL_CONV_DOWN_COEFF * abs_db ** (1.0 / 3.0) / (_NATURAL_CONV_DOWN_BASE + 1.0),
+                    _NATURAL_CONV_UP_COEFF * abs_db ** (1.0 / 3.0) / (_NATURAL_CONV_UP_BASE - 1.0),
+                )
+                qf1 = delta_b / (1.0 / h_cav_b + r2 / 2.0)
+
+                qf2 = 2.0 * (mid[2] - mid[3]) / fr2
+
+                delta_c = mid[3] - t_inside_k
+                abs_dc = np.abs(delta_c)
+                hi = np.where(
+                    delta_c >= 0.0,
+                    _NATURAL_CONV_DOWN_COEFF * abs_dc ** (1.0 / 3.0) / (_NATURAL_CONV_DOWN_BASE + 1.0),
+                    _NATURAL_CONV_UP_COEFF * abs_dc ** (1.0 / 3.0) / (_NATURAL_CONV_UP_BASE - 1.0),
+                )
+                q_inner = delta_c / (r3 / 2.0 + 1.0 / hi)
+
+                acc += q_inner * dt / 3600.0
+                mid[0] += dt * (q_outer - qf0) / cap0
+                mid[1] += dt * (qf0 - qf1) / cap1
+                mid[2] += dt * (qf1 - qf2) / cap2
+                mid[3] += dt * (qf2 - q_inner) / cap3
+            out[hour] = acc
     return out
 
 
@@ -432,10 +624,12 @@ def march_interior_flux(
     absorptance,
     *,
     dt_s: float | None = None,
-    internal_h_w_m2k: float = HEAT_INGRESS_INTERNAL_H_W_M2K,
     heating_setpoint_c: float = HEAT_INGRESS_HEATING_SETPOINT_C,
     cooling_setpoint_c: float = HEAT_INGRESS_COOLING_SETPOINT_C,
-    emissivity: float = HEAT_INGRESS_ROOF_EMISSIVITY,
+    emissivity=None,
+    roof_tilt_deg: float = HEAT_INGRESS_ROOF_TILT_DEG,
+    insulation_r_m2k_w=None,
+    insulation_thickness_m=None,
     initial_temps_k=None,
 ) -> np.ndarray:
     """
@@ -443,7 +637,8 @@ def march_interior_flux(
 
     Args:
         weather: Suburb-uniform hourly forcing.
-        stack: Roof construction (exactly 4 layers).
+        stack: Roof construction (exactly 4 layers, airspace at index 1 --
+            outer_skin / airspace / insulation / inner_lining).
         absorptance: Scalar or length-``B`` array of roof solar absorptances.
         dt_s: Solver timestep. Defaults to ``HEAT_INGRESS_SOLVER_DT_S`` (caller
             should pass a stability-checked value via ``resolve_timestep``).
@@ -451,6 +646,21 @@ def march_interior_flux(
             the march holds each substep, switched on instantaneous outdoor
             temp — below ``heating_setpoint_c`` uses the heating setpoint,
             otherwise the cooling setpoint (see ``config.settings``).
+        emissivity: Scalar or length-``B`` array of outer-skin long-wave
+            emissivity. Defaults to ``stack.emissivity`` (the current-roof
+            value) broadcast to every building -- pass ``stack.emissivity_cool``
+            for a cool-roof scenario march.
+        roof_tilt_deg: Roof pitch used by the airspace's outer-facing adaptive
+            convection coefficient. Defaults to
+            ``config.settings.HEAT_INGRESS_ROOF_TILT_DEG``.
+        insulation_r_m2k_w / insulation_thickness_m: Scalar or length-``B``
+            override for the insulation layer's R-value / thickness. Default
+            (``None``) keeps the stack's own value for every building --
+            pass a different value (see ``config.settings.
+            INSULATION_UPGRADE_R_M2K_W`` / ``INSULATION_UPGRADE_THICKNESS_M``)
+            for an insulation-upgrade scenario column. Density and specific
+            heat capacity are always the stack's own (same bulk material,
+            more or less of it).
         initial_temps_k: Optional ``(L,)`` or ``(L, B)`` starting layer mid-plane
             temperatures. Default: every layer at the first outdoor temperature
             (the run should discard a spin-up window — see ``annual_benefit``).
@@ -466,6 +676,35 @@ def march_interior_flux(
     n_layers = stack.thickness_m.size
     if n_layers != 4:
         raise ValueError("The heat-ingress model expects exactly 4 roof layers.")
+    if stack.cavity_index != 1:
+        raise ValueError(
+            "The adaptive-convection physics assumes the airspace layer sits at "
+            "index 1 (outer_skin, airspace, insulation, inner_lining) -- "
+            f"got cavity_index={stack.cavity_index}."
+        )
+
+    if emissivity is None:
+        emissivity_arr = np.full(n_buildings, stack.emissivity, dtype=float)
+    else:
+        emissivity_arr = np.ascontiguousarray(
+            np.broadcast_to(np.asarray(emissivity, dtype=float), (n_buildings,))
+        )
+
+    if insulation_r_m2k_w is None:
+        r2_arr = np.full(n_buildings, stack.r_value_m2k_w[2], dtype=float)
+    else:
+        r2_arr = np.ascontiguousarray(
+            np.broadcast_to(np.asarray(insulation_r_m2k_w, dtype=float), (n_buildings,))
+        )
+    if insulation_thickness_m is None:
+        insulation_thickness_arr = np.full(n_buildings, stack.thickness_m[2], dtype=float)
+    else:
+        insulation_thickness_arr = np.broadcast_to(
+            np.asarray(insulation_thickness_m, dtype=float), (n_buildings,)
+        )
+    cap2_arr = np.ascontiguousarray(
+        stack.density_kg_m3[2] * stack.heat_capacity_j_kgk[2] * insulation_thickness_arr
+    )
 
     dt = float(dt_s if dt_s is not None else HEAT_INGRESS_SOLVER_DT_S)
     substeps = int(np.ceil(3600.0 / dt))
@@ -473,6 +712,8 @@ def march_interior_flux(
     temp_k = np.ascontiguousarray(weather.outdoor_temp_c + _KELVIN)
     incident = np.ascontiguousarray(weather.shortwave_incident_w_m2)
     h_ext = np.ascontiguousarray(weather.h_ext_w_m2k)
+    humidity = np.ascontiguousarray(weather.humidity_percent)
+    hour_of_day = np.ascontiguousarray(weather.hour_of_day)
     n_intervals = weather.n_hours - 1
     if n_intervals < 1:
         raise ValueError("Weather series needs at least two hourly rows.")
@@ -481,7 +722,7 @@ def march_interior_flux(
     cap = stack.areal_heat_capacity_j_m2k
     heating_setpoint_k = heating_setpoint_c + _KELVIN
     cooling_setpoint_k = cooling_setpoint_c + _KELVIN
-    rad_coeff = emissivity * _STEFAN_BOLTZMANN_W_M2K4
+    cos_tilt = abs(math.cos(math.radians(roof_tilt_deg)))
 
     if initial_temps_k is None:
         mid = np.full((n_layers, n_buildings), temp_k[0], dtype=float)
@@ -497,17 +738,20 @@ def march_interior_flux(
     if _HAS_NUMBA:
         out = np.zeros((n_intervals, n_buildings), dtype=float)
         _march_kernel(
-            temp_k, incident, h_ext, absorptance,
-            r[0], r[1], r[2], r[3],
-            cap[0], cap[1], cap[2], cap[3],
-            dt, substeps, internal_h_w_m2k, heating_setpoint_k, cooling_setpoint_k,
-            rad_coeff, _SKY_DEPRESSION_K, np.ascontiguousarray(mid), out,
+            temp_k, incident, h_ext, humidity, hour_of_day,
+            absorptance, emissivity_arr,
+            r[0], r2_arr, r[3],
+            cap[0], cap[1], cap2_arr, cap[3],
+            dt, substeps, heating_setpoint_k, cooling_setpoint_k,
+            cos_tilt, np.ascontiguousarray(mid), out,
         )
     else:
         out = _march_numpy(
-            temp_k, incident, h_ext, absorptance, r, cap,
-            dt, substeps, internal_h_w_m2k, heating_setpoint_k, cooling_setpoint_k,
-            rad_coeff, _SKY_DEPRESSION_K, mid,
+            temp_k, incident, h_ext, humidity, hour_of_day,
+            absorptance, emissivity_arr, r[0], r2_arr, r[3],
+            cap[0], cap[1], cap2_arr, cap[3],
+            dt, substeps, heating_setpoint_k, cooling_setpoint_k,
+            cos_tilt, mid,
         )
 
     if not np.all(np.isfinite(out)):
@@ -615,11 +859,114 @@ def annual_benefit(
     )
 
 
+_INSULATION_OUTPUT_COLUMNS = (
+    "roof_heat_ingress_insulation_kwh_m2_yr",
+    "insulation_cooling_saved_thermal_kwh_yr",
+    "insulation_heating_saved_thermal_kwh_yr",
+    "insulation_cooling_saved_electricity_kwh_yr",
+    "insulation_heating_saved_electricity_kwh_yr",
+    "insulation_net_electricity_saved_kwh_yr",
+    "insulation_net_co2_saved_kg_yr",
+)
+
+
+def annual_benefit_insulation(
+    flux_base_wh_m2: np.ndarray,
+    flux_upgrade_wh_m2: np.ndarray,
+    weather: HourlyWeather,
+    roof_surface_area_m2,
+    building_type=None,
+    *,
+    spin_up_hours: int = HEAT_INGRESS_SPINUP_HOURS,
+    cdd_base_temp_c: float = CDD_BASE_TEMP,
+    cooling_fraction: float = COOLING_FRACTION,
+    heating_fraction: float = HEATING_FRACTION,
+    co2_factor_kg_kwh: float = GRID_EMISSIONS_FACTOR_KG_KWH,
+) -> pd.DataFrame:
+    """
+    Difference a base march against an insulation-upgrade march (same
+    absorptance/emissivity, different insulation R-value/thickness).
+
+    This is deliberately a separate function from ``annual_benefit``, not a
+    call to it: a solar-absorptance change trades a summer cooling gain
+    against a winter heating *penalty* (a cool roof also rejects wanted
+    winter solar warmth), so ``annual_benefit`` sums the same
+    ``base - scenario`` delta in both seasons and only relabels it
+    saving/penalty. Higher insulation resistance only ever *dampens*
+    conduction, in whichever direction it is currently flowing -- it saves
+    energy in both seasons and never trades one off against the other. The
+    "helps" sign therefore flips between seasons: cooling-season saving is
+    ``base - upgrade`` (upgrade lets less heat in), heating-season saving is
+    ``upgrade - base`` (upgrade lets less heat out).
+
+    Every column name says explicitly whether it's *thermal* (roof heat flux,
+    before the ``cooling_fraction``/``heating_fraction``/COP conversion) or
+    *electricity* (after it, what actually shows up as a saving) --
+    ``annual_benefit``'s equivalent columns are less consistent about this
+    (``cooling_season_heat_avoided_kwh_yr`` is thermal,
+    ``electricity_saved_kwh_yr`` is electricity, distinguished only by
+    "heat" vs "electricity" in the name), which invited exactly this mix-up
+    once results from both functions ended up in the same comparison.
+
+    Returns a ``B``-row DataFrame with :data:`_INSULATION_OUTPUT_COLUMNS`.
+    """
+    flux_base = np.asarray(flux_base_wh_m2, dtype=float)
+    flux_upgrade = np.asarray(flux_upgrade_wh_m2, dtype=float)
+    if flux_base.shape != flux_upgrade.shape:
+        raise ValueError("base and upgrade flux arrays must have the same shape")
+
+    n_buildings = flux_base.shape[1]
+    area = np.asarray(roof_surface_area_m2, dtype=float)
+    area = np.broadcast_to(area, (n_buildings,)).astype(float)
+
+    if building_type is None:
+        cop = np.full(n_buildings, HVAC_COP_RESIDENTIAL, dtype=float)
+    else:
+        bt = list(building_type) if not np.isscalar(building_type) else [building_type] * n_buildings
+        cop = np.array([hvac_cop(b) for b in bt], dtype=float)
+
+    interval_temp_c = weather.outdoor_temp_c[:-1]
+
+    spin = max(0, int(spin_up_hours))
+    sl = slice(spin, None)
+    base = flux_base[sl]
+    upgrade = flux_upgrade[sl]
+    temp = interval_temp_c[spin : spin + base.shape[0]]
+
+    cooling_mask = temp >= cdd_base_temp_c
+    cooling_wh_m2 = (base - upgrade)[cooling_mask].sum(axis=0)
+    heating_wh_m2 = (upgrade - base)[~cooling_mask].sum(axis=0)
+
+    # Clamp >= 0: a downgrade (worse R-value than the base) yields no saving.
+    cooling_kwh = np.maximum(0.0, cooling_wh_m2 / 1000.0) * area
+    heating_kwh = np.maximum(0.0, heating_wh_m2 / 1000.0) * area
+
+    cooling_elec_saved = cooling_kwh * cooling_fraction / cop
+    heating_elec_saved = heating_kwh * heating_fraction / cop
+    total_elec_saved = cooling_elec_saved + heating_elec_saved
+
+    upgrade_kwh_m2 = flux_upgrade[sl].sum(axis=0) / 1000.0
+
+    return pd.DataFrame(
+        {
+            "roof_heat_ingress_insulation_kwh_m2_yr": np.round(upgrade_kwh_m2, 2),
+            "insulation_cooling_saved_thermal_kwh_yr": np.round(cooling_kwh, 1),
+            "insulation_heating_saved_thermal_kwh_yr": np.round(heating_kwh, 1),
+            "insulation_cooling_saved_electricity_kwh_yr": np.round(cooling_elec_saved, 1),
+            "insulation_heating_saved_electricity_kwh_yr": np.round(heating_elec_saved, 1),
+            "insulation_net_electricity_saved_kwh_yr": np.round(total_elec_saved, 1),
+            "insulation_net_co2_saved_kg_yr": np.round(total_elec_saved * co2_factor_kg_kwh, 1),
+        }
+    )
+
+
 def _load_default_stacks() -> dict[str, RoofStack]:
-    """The two committed roof stacks, keyed the same way as ``stack_for_material``."""
+    """The four committed roof stacks, keyed the same way as ``stack_for_material``."""
     return {
         "metal": load_roof_layers(ROOF_LAYERS_CSV),
-        "tile": load_roof_layers(ROOF_LAYERS_TILE_CSV),
+        "concrete": load_roof_layers(ROOF_LAYERS_TILE_CSV),
+        "terracotta": load_roof_layers(ROOF_LAYERS_TERRACOTTA_CSV),
+        "slate": load_roof_layers(ROOF_LAYERS_SLATE_CSV),
     }
 
 
@@ -633,25 +980,44 @@ def run_model(
     building_type_col: str = "building_type",
     roof_material_col: str = "roof_material",
     cool_absorptance: float = COOL_ROOF_ABSORPTANCE,
+    insulation_r_upgrade_m2k_w: float | None = None,
+    insulation_thickness_upgrade_m: float | None = None,
 ) -> pd.DataFrame:
     """
     End-to-end Stage 3 engine: per-building transient benefit for one suburb.
 
     Each building is assigned a roof construction by ``roof_material``
-    (``stack_for_material`` -- terracotta/concrete tile get the tile stack,
-    everything else the metal-deck stack). Buildings are grouped by stack,
-    each group is marched once at its ``absorptance_before`` and once at
-    ``cool_absorptance`` (stacked into a single vectorised march per group,
-    each with its own stability-checked timestep), then rolled up to the
-    annual per-building columns.
+    (``stack_for_material`` -- metal/concrete tile/terracotta tile/slate, each
+    with its own outer-skin thickness/density/heat-capacity/R-value/
+    emissivity). Buildings are grouped by stack, each group is marched once at
+    its ``absorptance_before`` (current-roof emissivity) and once at
+    ``cool_absorptance`` (the stack's cool-roof emissivity) — stacked into a
+    single vectorised march per group, each with its own stability-checked
+    timestep — then rolled up to the annual per-building columns.
 
     Args:
-        roof_stack: ``None`` (default: both committed stacks, selected per
+        roof_stack: ``None`` (default: all four committed stacks, selected per
             building), a single ``RoofStack`` (forces every building onto it —
             useful for tests/back-compat), or an explicit ``{"metal": ...,
-            "tile": ...}`` dict.
+            "concrete": ...}`` dict.
+        insulation_r_upgrade_m2k_w: Opt-in third scenario -- ``None`` (default)
+            leaves Stage 3's output exactly as before (no insulation columns,
+            no extra march). Pass a value (see ``config.settings.
+            INSULATION_UPGRADE_R_M2K_W``) to also march each building at its
+            *current* absorptance/emissivity but the stack's insulation
+            layer swapped to this R-value, so the insulation lever can be
+            compared against the roof-coating lever
+            (:data:`_INSULATION_OUTPUT_COLUMNS`, from
+            ``annual_benefit_insulation``). ``insulation_thickness_upgrade_m``
+            pairs a thickness change with it (default: keep the stack's own
+            thickness, i.e. assume a more resistive material at the same
+            depth) -- see ``config.settings.INSULATION_UPGRADE_THICKNESS_M``
+            to instead reproduce the reference notebook's own thicker-batt
+            scenario.
 
-    Returns a DataFrame indexed like ``df`` with :data:`_OUTPUT_COLUMNS`.
+    Returns a DataFrame indexed like ``df`` with :data:`_OUTPUT_COLUMNS`
+    (plus :data:`_INSULATION_OUTPUT_COLUMNS` when
+    ``insulation_r_upgrade_m2k_w`` is given).
     """
     weather = build_hourly_weather(weather_df)
 
@@ -686,15 +1052,53 @@ def run_model(
         area = area_all[mask]
         building_type = [building_type_all[i] for i in np.where(mask)[0]]
 
-        # One march for both scenarios: columns [0:n] = current, [n:2n] = cool roof.
-        stacked_absorptance = np.concatenate([absorptance, np.full(n, float(cool_absorptance))])
-        logger.info(
-            "Marching %d '%s'-roof buildings × 2 scenarios over %d h at dt=%.1f s "
-            "(%d substeps/h)...",
-            n, key, weather.n_hours, dt, int(np.ceil(3600.0 / dt)),
+        test_insulation = insulation_r_upgrade_m2k_w is not None
+        n_scenarios = 3 if test_insulation else 2
+
+        # One march for all scenarios: columns [0:n] = current, [n:2n] = cool
+        # roof, and (opt-in) [2n:3n] = current roof + upgraded insulation.
+        current_r2 = float(stack.r_value_m2k_w[2])
+        current_thickness2 = float(stack.thickness_m[2])
+        stacked_absorptance = np.concatenate(
+            [absorptance, np.full(n, float(cool_absorptance))]
+            + ([absorptance] if test_insulation else [])
         )
-        flux = march_interior_flux(weather, stack, stacked_absorptance, dt_s=dt)
-        group_result = annual_benefit(flux[:, :n], flux[:, n:], weather, area, building_type)
+        stacked_emissivity = np.concatenate(
+            [np.full(n, stack.emissivity), np.full(n, stack.emissivity_cool)]
+            + ([np.full(n, stack.emissivity)] if test_insulation else [])
+        )
+        stacked_insulation_r = np.concatenate(
+            [np.full(n, current_r2), np.full(n, current_r2)]
+            + ([np.full(n, float(insulation_r_upgrade_m2k_w))] if test_insulation else [])
+        )
+        stacked_insulation_thickness = np.concatenate(
+            [np.full(n, current_thickness2), np.full(n, current_thickness2)]
+            + (
+                [np.full(n, float(insulation_thickness_upgrade_m
+                                   if insulation_thickness_upgrade_m is not None
+                                   else current_thickness2))]
+                if test_insulation else []
+            )
+        )
+        logger.info(
+            "Marching %d '%s'-roof buildings × %d scenario%s over %d h at dt=%.1f s "
+            "(%d substeps/h)...",
+            n, key, n_scenarios, "" if n_scenarios == 1 else "s",
+            weather.n_hours, dt, int(np.ceil(3600.0 / dt)),
+        )
+        flux = march_interior_flux(
+            weather, stack, stacked_absorptance, dt_s=dt,
+            emissivity=stacked_emissivity,
+            insulation_r_m2k_w=stacked_insulation_r,
+            insulation_thickness_m=stacked_insulation_thickness,
+        )
+        group_result = annual_benefit(flux[:, :n], flux[:, n:2 * n], weather, area, building_type)
+        if test_insulation:
+            insulation_result = annual_benefit_insulation(
+                flux[:, :n], flux[:, 2 * n:3 * n], weather, area, building_type
+            )
+            insulation_result.index = group_result.index
+            group_result = pd.concat([group_result, insulation_result], axis=1)
         group_result.insert(0, "roof_construction", key)
         group_result.index = df.index[mask]
         results.append(group_result)

@@ -54,13 +54,17 @@ benefits of cool roof interventions across Melbourne suburbs.
   Melbourne default. Output carries an `irradiance_source` column.
 - Stage 3 thermal modelling: per-building **transient 1-D finite-volume**
   heat-ingress model (`stage3_thermal/heat_ingress_model.py`, vectorised port
-  of `heat_ingress_model.ipynb`). Marches a layered roof at current vs cool
-  absorptance over a full BARRA2 year; reports cooling-season electricity
-  saved AND the winter heating penalty separately. Replaced the inferred
-  `R_roof` calculator 2026-09-10 (`thermal_calculator.py` deleted). Hourly
-  weather via `tools.fetch_heat_ingress_weather` (cached under
-  `data/raw/barra/`), offline fallback `data/samples/heat_ingress_carlton_2007.csv`.
-  See `DECISION_LOG.md`.
+  of `Final_Heat_Ingress_Model.ipynb`, re-ported 2026-09-19). Marches a
+  layered roof at current vs cool absorptance over a full BARRA2 year;
+  reports cooling-season electricity saved AND the winter heating penalty
+  separately. Sky temperature uses a Bliss dew-point correlation and the
+  airspace/indoor faces use EnergyPlus adaptive natural convection (both
+  replacing earlier fixed constants); four roof materials (metal, concrete
+  tile, terracotta, slate), each with its own construction and emissivity.
+  Replaced the inferred `R_roof` calculator 2026-09-10 (`thermal_calculator.py`
+  deleted). Hourly weather via `tools.fetch_heat_ingress_weather` (cached
+  under `data/raw/barra/`), offline fallback
+  `data/samples/heat_ingress_carlton_2007.csv`. See `DECISION_LOG.md`.
 - Gemini validation database: 507 buildings (Clayton 302, Carlton 205)
   stored at `data/output/experiments/`. Resume-safe, no repeat API cost.
 - Seasonal analysis tool (`tools.seasonal_analysis`): monthly cooling
@@ -86,14 +90,15 @@ benefits of cool roof interventions across Melbourne suburbs.
 ### Next Priorities (ranked — keep in sync with README Roadmap)
 
 1. Validate the Stage 3 transient model inputs against Stuart's NatHERS runs /
-   AS-NZS 4859.1: the roof stacks' sourced properties, the 18°C
+   AS-NZS 4859.1: the four roof stacks' sourced properties, the 18°C
    cooling/heating hour split, `COOLING_FRACTION`/`HEATING_FRACTION` (0.70),
-   `T_sky = T_out - 10 K`, one COP for cooling and heating. Publish a
-   sensitivity analysis (constants in `config/settings.py`).
-2. Extend per-material roof construction (2026-09-12 added a terracotta/
-   concrete-tile stack, `stack_for_material()`) — everything else still
-   defaults to the metal-deck stack. Add more materials; consider whether
-   terracotta and concrete tile need separate stacks.
+   one COP for cooling and heating. Publish a sensitivity analysis (constants
+   in `config/settings.py`).
+2. Wire per-building `pitch_deg` into the airspace's outer-facing adaptive
+   convection coefficient — currently one global `HEAT_INGRESS_ROOF_TILT_DEG`
+   (20°), matching how `Final_Heat_Ingress_Model.ipynb` itself still scopes
+   tilt. (2026-09-19 already split terracotta/concrete/slate/metal into four
+   distinct stacks via `stack_for_material()`.)
 3. Replace rectangular bboxes with true ABS SA2 suburb polygons and an
    `inside_suburb` flag; report in-boundary totals.
 4. Filter non-building footprints from Stage 1 (Gemini found 24% of Clayton
@@ -201,16 +206,28 @@ Quick reference:
 - **Stage 1:** OSM + VicMap footprints, HSV pixel classifier. `energy_saved_kwh_yr`
   is absorbed solar reduction — NOT electricity savings. Stage 3 handles that.
 - **Stage 3:** per-building transient finite-volume roof model
-  (`stage3_thermal/heat_ingress_model.py`). Two roof stacks — metal deck
-  (`Regular_Roof.csv`, default) and terracotta/concrete tile (`Tile_Roof.csv`),
-  picked per building via `stack_for_material(roof_material)`; output carries a
-  `roof_construction` audit column. Marches current vs cool absorptance over a
-  full hourly BARRA2 year at a two-point indoor setpoint (18°C heating / 20°C
-  cooling, switched on outdoor temp — `HEAT_INGRESS_HEATING_SETPOINT_C` /
-  `HEAT_INGRESS_COOLING_SETPOINT_C`); splits the delta by 18°C outdoor temp
-  into cooling saving vs heating penalty. Constants in
-  `config/settings.py` (`HEAT_INGRESS_*`, `COOLING_FRACTION`, COP) are
-  unvalidated Melbourne defaults — the #1 roadmap item.
+  (`stage3_thermal/heat_ingress_model.py`, ported from
+  `Final_Heat_Ingress_Model.ipynb`, 2026-09-19). Four roof stacks — metal
+  (`Regular_Roof.csv`, default), concrete tile (`Tile_Roof.csv`), terracotta
+  (`Terracotta_Roof.csv`), slate (`Slate_Roof.csv`) — picked per building via
+  `stack_for_material(roof_material)`; output carries a `roof_construction`
+  audit column. Sky temperature is a Bliss dew-point correlation; the
+  airspace/indoor faces use EnergyPlus adaptive natural convection (not fixed
+  constants). Marches current vs cool absorptance (each at its own
+  material-specific emissivity) over a full hourly BARRA2 year at a two-point
+  indoor setpoint (18°C heating / 20°C cooling, switched on outdoor temp —
+  `HEAT_INGRESS_HEATING_SETPOINT_C` / `HEAT_INGRESS_COOLING_SETPOINT_C`);
+  splits the delta by 18°C outdoor temp into cooling saving vs heating
+  penalty. Constants in `config/settings.py` (`HEAT_INGRESS_*`,
+  `COOLING_FRACTION`, COP) are unvalidated Melbourne defaults — the #1
+  roadmap item. Opt-in insulation-upgrade scenario
+  (`run_stage3 --insulation-r-upgrade R_M2K_W`, 2026-09-19) marches a third
+  column at upgraded insulation R-value/thickness instead of cool-roof
+  absorptance, so the insulation lever can be compared against the
+  roof-coating lever — off by default, adds `insulation_*` columns when used.
+  Unlike cool-roof absorptance (summer gain vs winter penalty tradeoff),
+  better insulation saves in both seasons with no penalty side
+  (`annual_benefit_insulation`).
 
 ## README Update Rules
 
