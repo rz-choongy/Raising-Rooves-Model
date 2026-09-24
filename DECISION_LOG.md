@@ -4,6 +4,285 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-09-19 — Stage 3 kernel: hoist suburb-uniform weather out of the per-building loop
+
+**Decision:** In `_march_kernel` (the numba-JIT transient march), every
+per-substep weather-derived quantity — interpolated outdoor temp,
+irradiance, wind-driven `h_ext`, and the sky temperature (a `log` + `cos` +
+fractional power) — was being recomputed independently for **every
+building at every substep**, even though none of it depends on which
+building is being marched; it's suburb-uniform weather. With thousands of
+buildings per material group, the sky-temperature formula alone was running
+thousands of times more often than the physics requires. Restructured to
+precompute the whole weather+sky series once (`n_intervals × substeps`
+values, ~6 MB for a full year) in a loop *before* the per-building `prange`
+loop, so each building just indexes into it instead of recomputing it.
+
+**Why:** found while answering "is anything in the code inefficient" —
+the loop nesting (`for b in prange(buildings): for h: for s:`) put weather
+interpolation and the newly-added (2026-09-19 physics port) sky-temperature
+correlation *inside* the building loop, where it doesn't belong: nothing in
+that block reads `b`. The three `h_cav_a`/`h_cav_b`/`hi` adaptive-convection
+terms genuinely can't be hoisted (they depend on the building's own
+mid-plane temperatures), so they stay inside.
+
+**Verified:** `test_matches_notebook_reference` and
+`test_numba_and_numpy_paths_agree` still pass unchanged (same arithmetic,
+just computed once instead of redundantly — bit-for-bit identical results
+expected and observed). Timed the full Carlton run (6,177 buildings, cool-
+roof scenario) before/after: **270s → 108s, a 2.5× speedup**, with zero
+change to any output number.
+
+**Rejected:** rewriting `_march_numpy` (the non-numba fallback) the same
+way — it already computes weather/sky as scalars once per substep and
+broadcasts across buildings via numpy array ops, so it never had this
+redundancy in the first place; only the numba kernel's explicit
+per-building loop did.
+
+**Code/docs affected:** `stage3_thermal/heat_ingress_model.py`
+(`_march_kernel` only).
+
+**Follow-up:** a broader efficiency pass over the rest of the pipeline
+found nothing else of comparable magnitude — a few `df.iterrows()` loops in
+Stage 1 (per-building geometry parsing, not easily vectorised),
+`tools/visualise_results.py` (one-shot map rendering), and
+`tools/seasonal_analysis.py` (a 12-row monthly table) exist but are not hot
+paths the way Stage 3's transient march is.
+
+---
+
+## 2026-09-19 — Stage 3: opt-in insulation-upgrade scenario
+
+**Decision:** Added a third, opt-in march scenario to `run_model()` —
+`insulation_r_upgrade_m2k_w` (+ `insulation_thickness_upgrade_m`) — that
+marches each building at its *current* absorptance and emissivity but with
+the insulation layer's R-value/thickness swapped, so the ceiling-insulation
+lever can be compared against the roof-coating lever on identical buildings
+and weather. Off by default (`None`): existing calls, output columns, and
+tests are all unaffected unless a caller opts in. Exposed on the CLI as
+`run_stage3.py --insulation-r-upgrade R_M2K_W [--insulation-thickness-upgrade
+THICKNESS_M]`.
+
+Architecturally this reused the pattern the emissivity change (same day,
+physics-port entry above) already established: the insulation layer's
+R-value and areal heat capacity, previously scalars shared by every building
+in a march group, became `(B,)` arrays in `_march_kernel` / `_march_numpy` —
+the outer-skin and inner-lining resistances stay scalar since only
+insulation varies. `run_model` stacks a third `n`-column block onto the
+existing two-scenario march (current, cool-roof, insulation-upgrade) when
+requested.
+
+**Why a new aggregation function, not `annual_benefit` again:** a
+solar-absorptance change trades a summer cooling *gain* against a winter
+heating *penalty* — a cool roof also rejects wanted winter solar warmth, so
+`annual_benefit` sums the same `base − scenario` delta in both seasons and
+only relabels it saving/penalty. Higher insulation resistance only ever
+*dampens* conduction, in whichever direction it's currently flowing — it
+saves energy in **both** seasons and never trades one off against the other.
+Forcing it through `annual_benefit` unchanged would have silently clamped
+the (genuine) heating-season saving to zero, because that function's
+`np.maximum(0.0, ...)` clamp assumes a negative delta means "inapplicable,"
+which is true for a cool roof but wrong for insulation. `annual_benefit_
+insulation` uses `base − upgrade` for the cooling season and `upgrade −
+base` for the heating season — the sign flips because the "helps" direction
+flips with the direction of heat flow, not with which season it's labelled.
+
+**Why R4.1 / 215 mm are the defaults:** both are
+`Final_Heat_Ingress_Model.ipynb`'s own named "Insulation_new" row (vs the
+"Insulation_old" row — R2.5, 130 mm — already the four committed stacks'
+current default). Same density/heat-capacity as Insulation_old — a thicker
+batt of the same bulk material (conductivity works out to ~0.052 W/mK either
+way), not a different, independently-sourced product. Like
+`COOL_ROOF_ABSORPTANCE`, this is a scenario target, not measured
+per-building data — there is no insulation-level column anywhere in Stage
+1/2's output to compare against.
+
+**Verified end-to-end** on real Carlton buildings (`stage2_carlton.parquet`,
+2019 weather): for the suburb's 20 darkest roofs, the insulation-upgrade
+scenario (R2.5→4.1) saved roughly 2× the electricity of the cool-roof
+coating on the same buildings, split close to evenly between cooling and
+heating savings — confirming the "helps both seasons, no penalty" property
+holds in practice, not just in the unit tests.
+
+**Tradeoffs:** varying insulation thickness alongside R (to match
+Insulation_new's real numbers) changes the insulation layer's thermal mass
+too, which is physically correct (installing a thicker batt adds material)
+but means the "upgrade" scenario isn't a pure single-variable resistance
+sweep unless the caller leaves `insulation_thickness_upgrade_m` unset (the
+default keeps thickness at the stack's own value, varying R alone). Neither
+knob is tied to any real per-building retrofit data — same caveat as every
+other Stage 3 constant, roadmap item 1.
+
+**Rejected:**
+- *Reusing `annual_benefit` for the insulation scenario* — would have
+  under-reported the heating-season saving as zero (see above); a correctness
+  bug, not a simplification.
+- *Making insulation the pipeline's default third scenario* — the user asked
+  to be able to *test* the insulation lever, not to change what Stage 3
+  reports for every run; opt-in via an explicit CLI flag keeps existing
+  outputs and comparisons (e.g. the old/new-model, 2007/2019 artifacts)
+  untouched.
+
+**Code/docs affected:** `stage3_thermal/heat_ingress_model.py`
+(`_march_kernel`, `_march_numpy`, `march_interior_flux`,
+`annual_benefit_insulation`, `run_model`), `stage3_thermal/pipeline.py`,
+`stage3_thermal/run_stage3.py`, `config/settings.py`
+(`INSULATION_UPGRADE_R_M2K_W`, `INSULATION_UPGRADE_THICKNESS_M`),
+`tests/test_heat_ingress_model.py`, `README.md`.
+
+**Follow-up:** run the insulation-upgrade scenario across all 14 suburbs (the
+same way the model-port and weather-year comparisons were) if the FYP wants
+a suburb-wide "paint vs insulation" comparison artifact.
+
+**Addendum (same day) — thermal/electricity naming was ambiguous, caused a
+real mix-up:** the original column names —
+`insulation_cooling_saved_kwh_yr`, `insulation_heating_saved_kwh_yr`,
+`insulation_electricity_saved_kwh_yr`, `insulation_co2_saved_kg_yr` — didn't
+say whether they were *thermal* (roof heat flux, before the
+`cooling_fraction`/`heating_fraction`/COP conversion) or *electricity*
+(after it). They were in fact thermal, but read as parallel to
+`annual_benefit`'s `electricity_saved_kwh_yr`, which is electricity. This
+produced a real error in the follow-up comparison artifact: its breakdown
+chart compared the coating's electricity columns against insulation's
+thermal columns directly, making insulation look roughly 4x better than it
+actually is at that chart (the net figures elsewhere were still correct,
+since those already used the properly-converted electricity column).
+
+Renamed for explicitness: `insulation_cooling_saved_thermal_kwh_yr`,
+`insulation_heating_saved_thermal_kwh_yr`, plus two new columns split out of
+the total (`insulation_cooling_saved_electricity_kwh_yr`,
+`insulation_heating_saved_electricity_kwh_yr`) so an electricity-only
+breakdown is actually possible, and `insulation_electricity_saved_kwh_yr` →
+`insulation_net_electricity_saved_kwh_yr` / `insulation_co2_saved_kg_yr` →
+`insulation_net_co2_saved_kg_yr` for parity with `annual_benefit`'s
+`net_electricity_saved_kwh_yr` naming. All 14 suburbs' already-saved
+`stage3_*.parquet`/`.csv` had their columns renamed in place (instant, no
+re-march needed) and the two new electricity-split columns derived
+(`thermal × fraction ÷ COP`, matching the model's own formula) rather than
+re-running the transient march. The published "Paint or Insulate?" artifact
+was corrected and republished at the same URL.
+
+**Why this is worth recording:** `annual_benefit`'s own columns have the
+same latent ambiguity (`cooling_season_heat_avoided_kwh_yr` is thermal,
+`electricity_saved_kwh_yr` is electricity, distinguished only by "heat" vs
+"electricity" in the name, not a consistent suffix) — left as-is here since
+renaming it is a much larger blast radius (used throughout
+`tools/visualise_results.py`, `tools/compare_suburbs.py`, README, and every
+suburb's saved output), but any future Stage 3 column should default to an
+explicit `_thermal_`/`_electricity_` suffix rather than relying on readers
+to infer it from words like "heat".
+
+---
+
+## 2026-09-19 — Stage 3 physics ported from Final_Heat_Ingress_Model.ipynb
+
+**Decision:** Ported three physics upgrades from the team's updated reference
+notebook (`stage3_thermal/Final_Heat_Ingress_Model.ipynb`, superseding the
+earlier `heat_ingress_model.ipynb`) into `stage3_thermal/heat_ingress_model.py`:
+
+1. **Sky temperature** — replaced the fixed `T_sky = T_out − 10 K` assumption
+   with a Bliss (1961) dew-point + time-of-day clear-sky correlation, driven by
+   BARRA2's `rel_humidity_percent` (`HourlyWeather.humidity_percent`) and each
+   timestamp's local hour (`HourlyWeather.hour_of_day`).
+2. **Adaptive natural convection** — the airspace layer's two face
+   conductances (outer_skin↔airspace, airspace↔insulation) and the
+   inner_lining→indoor face now use EnergyPlus/McAdams natural-convection
+   coefficients, recomputed every substep from the instantaneous ΔT and
+   direction of heat flow, replacing the fixed `CAVITY_R_DOWNWARD_M2K_W`
+   override and fixed `HEAT_INGRESS_INTERNAL_H_W_M2K` constant (both removed).
+   This required standardising every roof stack onto the same layer order
+   (outer_skin, airspace, insulation, inner_lining — airspace always index 1);
+   `march_interior_flux` now raises if a stack doesn't match.
+3. **Four roof materials, each with its own emissivity** — `Roof_Layers` in
+   the notebook gives Slate/Terracotta/Concrete/Steel_light/Steel_dark their
+   own thickness/density/heat-capacity/R-value, real values pulled from the
+   notebook's own saved cell output (steel_light and steel_dark are
+   numerically identical apart from a fixed default absorptivity we don't
+   use). `stack_for_material()` now maps to four stacks (`metal`, `concrete`,
+   `terracotta`, `slate`) instead of two (`metal`, `tile`); concrete tile and
+   terracotta no longer share one averaged construction. Each stack also
+   carries `emissivity`/`emissivity_cool` (0.9 base for every material; cool
+   coating 0.875 metal/concrete, 0.880 terracotta/slate) — Stage 3 now
+   marches the cool-roof scenario at its own emissivity rather than reusing
+   the current roof's value.
+
+**What was explicitly left out (asked first, Ryan confirmed):**
+- **Rooftop PV coverage.** The notebook adds a fixed 30% PV-panel layer with
+  its own cell-temperature/convection/radiation sub-model over every roof.
+  Not ported — Stage 3 answers "current roof vs cool roof," and folding in an
+  assumed PV fraction with no per-building PV data would change the question
+  the model answers, not just its accuracy.
+- **Fixed per-material absorptivity table.** The notebook's `Roof_Layers` also
+  carries a fixed `Absorptivity`/`Absorptivity_cool` per material. Stage 1's
+  `absorptance_before` is a continuous per-building HSV-classifier value —
+  strictly more granular than a 5-way material lookup — so it stays the
+  absorptance source; only construction and emissivity come from the table.
+- **Per-building roof pitch in the convection correlation.** The airspace's
+  outer-facing coefficient needs a tilt; the notebook itself still hardcodes
+  one placeholder value (`roof_tilt = 20`, "Later this should come from Table
+  2") rather than a per-building input, so the port mirrors that scoping
+  (`HEAT_INGRESS_ROOF_TILT_DEG = 20.0`) rather than exceeding the source
+  notebook's own decision. Stage 1's `pitch_deg` is real per-building data and
+  not yet wired in — tracked as a roadmap item (`README.md`).
+
+**Why:** Ryan's ask — "we have updated the heat ingress model, update
+heat_ingress_model.py with the final_ heat_ingress_model.ipynb, overwriting
+decisions in heat_ingress_model.ipynb." The team's reference notebook moved
+past several of the original port's crude placeholders (fixed sky-temperature
+offset, fixed internal/cavity convection, one averaged tile construction);
+this brings the production pipeline in line with that updated reference.
+
+**Material mapping verified against real data**, not assumed: checked every
+`roof_material` value actually present across all 14 suburbs (47,646
+buildings) before deciding the map. `concrete_tile` (33.1%), `metal_dark`
+(28.3%), `metal_light` (11.7%), and `terracotta` (6.9%) are classifier output;
+`slate` genuinely occurs (3 buildings, raw OSM tag) validating a dedicated
+stack; `roof_tiles` (7, ambiguous raw OSM tag) falls back to concrete, the
+more common tile type by a wide margin; `other`/`None`/stray values (`metal`,
+`metal_sheet`, `glass`, `wood`; ~20%) keep the existing metal-deck fallback.
+
+**Numerical impact:** re-running Carlton 2007 end-to-end: net electricity
+saved moved from 583,154 kWh/yr (94.4/building) to 798,197 kWh/yr
+(129.2/building) — the physics changes are not a rounding-level tweak.
+Existing `data/output/stage3_*.parquet` outputs for every suburb reflect the
+pre-port physics until re-run.
+
+**Tradeoffs:** All four roof stacks' `Emissivity`/`Emissivity_cool` values and
+outer-skin thicknesses came from the notebook's own saved output cell (not
+independently re-derived or measured) — same unvalidated-constant caveat as
+the rest of Stage 3's physics (roadmap item 1). Standardising every stack onto
+one layer order (airspace always index 1) is a simplification the notebook
+itself doesn't need to make (it only ever runs one building/material at a
+time) — enforced here because the vectorised pipeline groups buildings by
+stack and marches each group with one shared set of equations.
+
+**Rejected:**
+- *Keep two stacks (metal/tile), only update constants* — would have missed
+  the terracotta/concrete split and the material-specific emissivity, both
+  explicit decisions in the source notebook, not incidental byproducts.
+- *Silently drop PV and the fixed absorptivity table without discussion* —
+  both are large enough scope changes (PV redefines what "current roof" means;
+  the absorptivity table would have discarded Stage 1's per-building
+  granularity) that they warranted a direct check rather than a judgment call.
+
+**Code/docs affected:** `stage3_thermal/heat_ingress_model.py`,
+`config/settings.py` (removed `HEAT_INGRESS_INTERNAL_H_W_M2K`; added
+`HEAT_INGRESS_ROOF_TILT_DEG`, `ROOF_LAYERS_TERRACOTTA_CSV`,
+`ROOF_LAYERS_SLATE_CSV`), `Input Tables/Regular_Roof.csv` and
+`Tile_Roof.csv` (updated), `Input Tables/Terracotta_Roof.csv` and
+`Slate_Roof.csv` (new), `tests/test_heat_ingress_model.py`, `README.md`.
+`tools/_correlation_analysis.py` (untracked, Ryan's own script) still checks
+`roof_construction == "tile"`, which no longer exists as a value — flagged,
+not changed, since it's in-progress work outside this task's scope.
+
+**Follow-up:** re-run Stage 3 for every suburb to pick up the new physics (the
+2007-vs-2019 comparison archived in this log's 2026-09-19-adjacent work used
+the pre-port model); wire in per-building `pitch_deg` for the airspace
+convection coefficient; validate the four stacks' emissivity/construction
+values against a real source.
+
+---
+
 ## 2026-09-14 — Interstate comparison suburb: Parramatta, NSW; bbox validation widened to Australia
 
 **Decision:** Add `parramatta` to `config/suburbs.py` (SA2 `125041717`,

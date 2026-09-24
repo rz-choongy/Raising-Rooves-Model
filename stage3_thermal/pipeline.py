@@ -22,6 +22,19 @@ The per-building saving is the difference between marching the model at the
 building's current solar absorptance and at COOL_ROOF_ABSORPTANCE. Weather is a
 suburb-uniform hourly BARRA2 extract (~11 km grid); see _resolve_weather for the
 source priority.
+
+Passing --insulation-r-upgrade adds an opt-in third scenario (same
+absorptance/emissivity, upgraded insulation R-value/thickness) and seven more
+columns -- thermal (roof heat flux, before the cooling/heating-fraction and
+COP conversion) and electricity (after it) always spelled out explicitly in
+the name: roof_heat_ingress_insulation_kwh_m2_yr,
+insulation_cooling_saved_thermal_kwh_yr, insulation_heating_saved_thermal_kwh_yr,
+insulation_cooling_saved_electricity_kwh_yr,
+insulation_heating_saved_electricity_kwh_yr,
+insulation_net_electricity_saved_kwh_yr, insulation_net_co2_saved_kg_yr --
+so the insulation lever can be compared against the roof-coating lever
+without silently mixing thermal and electricity units. Off by default; see
+DECISION_LOG.md 2026-09-19.
 """
 
 from __future__ import annotations
@@ -119,6 +132,8 @@ def run_stage3(
     suburb_name: str,
     weather_csv: Path | None = None,
     year: int = HEAT_INGRESS_REFERENCE_YEAR,
+    insulation_r_upgrade_m2k_w: float | None = None,
+    insulation_thickness_upgrade_m: float | None = None,
 ) -> pd.DataFrame:
     """
     Run the full Stage 3 heat-ingress pipeline for a suburb.
@@ -130,6 +145,12 @@ def run_stage3(
         suburb_name: Suburb to process (must have a Stage 2 output parquet).
         weather_csv: Optional explicit hourly BARRA2 CSV (else auto-resolved).
         year: BARRA2 reference year for the weather.
+        insulation_r_upgrade_m2k_w: Opt-in insulation-upgrade scenario (see
+            ``heat_ingress_model.run_model``). ``None`` (default) leaves
+            output columns unchanged.
+        insulation_thickness_upgrade_m: Paired thickness override for the
+            insulation-upgrade scenario (default: keep the stack's own
+            thickness).
 
     Returns:
         DataFrame with all Stage 2 columns plus the Stage 3 thermal columns.
@@ -156,7 +177,11 @@ def run_stage3(
 
     # ── Step 3: Transient model per building ──────────────────────────────────
     logger.info("Step 3/3: Marching the transient roof model per building...")
-    thermal_df = run_model(df, weather_df)
+    thermal_df = run_model(
+        df, weather_df,
+        insulation_r_upgrade_m2k_w=insulation_r_upgrade_m2k_w,
+        insulation_thickness_upgrade_m=insulation_thickness_upgrade_m,
+    )
     df = pd.concat([df.reset_index(drop=True), thermal_df.reset_index(drop=True)], axis=1)
 
     # ── Summary (per-building / per-m² first, totals second) ──────────────────
@@ -193,6 +218,14 @@ def run_stage3(
         "~%.1f households/yr (net).",
         total_co2, total_net_co2, total_net / _HOUSEHOLD_KWH_YR,
     )
+    if insulation_r_upgrade_m2k_w is not None:
+        total_insulation = df["insulation_net_electricity_saved_kwh_yr"].sum()
+        per_building_insulation = df["insulation_net_electricity_saved_kwh_yr"].mean()
+        logger.info(
+            "Insulation upgrade (R%.1f): %.0f kWh/yr saved (%.0f/building) vs "
+            "%.0f kWh/yr net from the cool-roof coating -- both levers, same roofs.",
+            insulation_r_upgrade_m2k_w, total_insulation, per_building_insulation, total_net,
+        )
 
     # ── Save outputs ──────────────────────────────────────────────────────────
     save_stage_outputs(df, 3, suburb_key)

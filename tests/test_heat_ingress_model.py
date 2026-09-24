@@ -1,18 +1,23 @@
 """
 Tests for stage3_thermal/heat_ingress_model.py — the vectorised transient roof
-heat-ingress engine that replaced the inferred-R_roof thermal_calculator.
+heat-ingress engine that replaced the inferred-R_roof thermal_calculator, and
+that itself was ported from Final_Heat_Ingress_Model.ipynb (2026-09-19,
+superseding the earlier heat_ingress_model.ipynb).
 
 Covers:
-- Roof stack loading + cavity-R override
-- Weather array preparation (shortwave sum, wind → h_ext height correction)
+- Roof stack loading, per-material emissivity, four-way material mapping
+- Weather array preparation (shortwave sum, wind → h_ext height correction,
+  humidity/hour-of-day passthrough)
 - Stability timestep and its clamping
 - Vectorised march parity with a faithful scalar re-implementation of the
-  notebook's transient cell (heat_ingress_model.ipynb, cell 23bd2f98)
+  notebook's transient cell (Final_Heat_Ingress_Model.ipynb, adaptive
+  convection + dew-point sky temperature)
 - march_interior_flux for N buildings == N single-building marches
 - annual_benefit: monotonicity in absorptance, no-op for already-cool roofs,
   signed heating penalty, output columns, COP by building type
 """
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -23,18 +28,31 @@ from config.settings import (
     COOL_ROOF_ABSORPTANCE,
     HEAT_INGRESS_COOLING_SETPOINT_C,
     HEAT_INGRESS_HEATING_SETPOINT_C,
+    HEAT_INGRESS_ROOF_EMISSIVITY,
+    HEAT_INGRESS_ROOF_TILT_DEG,
     HVAC_COP_COMMERCIAL,
     HVAC_COP_RESIDENTIAL,
+    INSULATION_UPGRADE_R_M2K_W,
+    INSULATION_UPGRADE_THICKNESS_M,
+    ROOF_LAYERS_SLATE_CSV,
+    ROOF_LAYERS_TERRACOTTA_CSV,
     ROOF_LAYERS_TILE_CSV,
 )
 from stage3_thermal import heat_ingress_model as him
 from stage3_thermal.heat_ingress_model import (
+    _DEWPOINT_A,
+    _DEWPOINT_B,
+    _INSULATION_OUTPUT_COLUMNS,
     _KELVIN,
+    _NATURAL_CONV_DOWN_BASE,
+    _NATURAL_CONV_DOWN_COEFF,
+    _NATURAL_CONV_UP_BASE,
+    _NATURAL_CONV_UP_COEFF,
     _OUTPUT_COLUMNS,
-    _SKY_DEPRESSION_K,
     _STEFAN_BOLTZMANN_W_M2K4,
     HourlyWeather,
     annual_benefit,
+    annual_benefit_insulation,
     build_hourly_weather,
     hvac_cop,
     load_roof_layers,
@@ -60,20 +78,20 @@ def weather(weather_df) -> HourlyWeather:
 
 @pytest.fixture(scope="module")
 def stack():
-    # Explicit cavity-R override (matches the notebook's transient run).
-    return load_roof_layers(cavity_r_m2k_w=0.23)
+    return load_roof_layers()
 
 
-# ── Faithful scalar reference (notebook cell 23bd2f98) ───────────────────────
+# ── Faithful scalar reference (Final_Heat_Ingress_Model.ipynb transient cell) ─
 def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
-    """One-building transient march, transcribed from the notebook."""
-    R = stack.r_value_m2k_w
+    """One-building transient march, transcribed from the final notebook."""
+    r0, r2, r3 = stack.r_value_m2k_w[0], stack.r_value_m2k_w[2], stack.r_value_m2k_w[3]
     density = stack.density_kg_m3
     Cp = stack.heat_capacity_j_kgk
     thick = stack.thickness_m
-    hi = 3.0
-    emissivity = 0.9
+    emissivity = stack.emissivity
+    cos_tilt = abs(math.cos(math.radians(HEAT_INGRESS_ROOF_TILT_DEG)))
     const = _STEFAN_BOLTZMANN_W_M2K4
+    rad_coeff = emissivity * const
     T_heat = HEAT_INGRESS_HEATING_SETPOINT_C + _KELVIN
     T_cool = HEAT_INGRESS_COOLING_SETPOINT_C + _KELVIN
 
@@ -81,6 +99,8 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
     temp_k = weather.outdoor_temp_c + _KELVIN
     q_sw_hourly = absorptance * weather.shortwave_incident_w_m2
     h_ext = weather.h_ext_w_m2k
+    humidity = weather.humidity_percent
+    hour_of_day = weather.hour_of_day
 
     mid = np.full(4, temp_k[0], dtype=float)
     out = np.zeros(weather.n_hours - 1)
@@ -88,19 +108,52 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
         outside = np.linspace(temp_k[hour], temp_k[hour + 1], tph)
         shortwave = np.linspace(q_sw_hourly[hour], q_sw_hourly[hour + 1], tph)
         ho = np.linspace(h_ext[hour], h_ext[hour + 1], tph)
+        rh = np.linspace(humidity[hour], humidity[hour + 1], tph)
+        t_day0 = hour_of_day[hour]
         acc = 0.0
         for ts in range(tph):
+            frac = ts / (tph - 1) if tph > 1 else 0.0
+
+            t_air_c = outside[ts] - _KELVIN
+            humidity_term = math.log(rh[ts] / 100.0) + (_DEWPOINT_A * t_air_c) / (_DEWPOINT_B + t_air_c)
+            t_dp_c = _DEWPOINT_B * humidity_term / (_DEWPOINT_A - humidity_term)
+            t_local = t_day0 + frac
+            sky = outside[ts] * (
+                0.711 + 0.0056 * t_dp_c + 0.000073 * t_dp_c ** 2
+                + 0.013 * math.cos(math.radians(15.0 * t_local))
+            ) ** 0.25
+
             q = np.zeros(5)
-            sky = outside[ts] - _SKY_DEPRESSION_K
             q[0] = (
                 shortwave[ts]
                 + ho[ts] * (outside[ts] - mid[0])
-                + emissivity * const * (sky ** 4 - mid[0] ** 4)
+                + rad_coeff * (sky ** 4 - mid[0] ** 4)
             )
-            for j in range(1, 4):
-                q[j] = 2 * (mid[j - 1] - mid[j]) / (R[j - 1] + R[j])
+
+            delta_a = mid[0] - mid[1]
+            if delta_a >= 0.0:
+                h_cav_a = _NATURAL_CONV_DOWN_COEFF * abs(delta_a) ** (1 / 3) / (_NATURAL_CONV_DOWN_BASE + cos_tilt)
+            else:
+                h_cav_a = _NATURAL_CONV_UP_COEFF * abs(delta_a) ** (1 / 3) / (_NATURAL_CONV_UP_BASE - cos_tilt)
+            q[1] = delta_a / (r0 / 2.0 + 1.0 / h_cav_a)
+
+            delta_b = mid[1] - mid[2]
+            if delta_b >= 0.0:
+                h_cav_b = _NATURAL_CONV_DOWN_COEFF * abs(delta_b) ** (1 / 3) / (_NATURAL_CONV_DOWN_BASE + 1.0)
+            else:
+                h_cav_b = _NATURAL_CONV_UP_COEFF * abs(delta_b) ** (1 / 3) / (_NATURAL_CONV_UP_BASE - 1.0)
+            q[2] = delta_b / (1.0 / h_cav_b + r2 / 2.0)
+
+            q[3] = 2 * (mid[2] - mid[3]) / (r2 + r3)
+
             T_inside = T_heat if outside[ts] < T_heat else T_cool
-            q[4] = (mid[3] - T_inside) / (R[3] / 2 + 1 / hi)
+            delta_c = mid[3] - T_inside
+            if delta_c >= 0.0:
+                hi = _NATURAL_CONV_DOWN_COEFF * abs(delta_c) ** (1 / 3) / (_NATURAL_CONV_DOWN_BASE + 1.0)
+            else:
+                hi = _NATURAL_CONV_UP_COEFF * abs(delta_c) ** (1 / 3) / (_NATURAL_CONV_UP_BASE - 1.0)
+            q[4] = delta_c / (r3 / 2.0 + 1.0 / hi)
+
             acc += q[4] * dt / 3600.0
             mid = mid + dt * (q[:-1] - q[1:]) / (density * Cp * thick)
         out[hour] = acc
@@ -110,26 +163,41 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
 # ── Roof stack ──────────────────────────────────────────────────────────────
 class TestRoofStack:
     def test_layer_order(self, stack):
-        assert stack.layer_names == ("Steel", "Insulation", "Cavity", "Plaster")
+        assert stack.layer_names == ("Steel", "Cavity", "Insulation", "Plaster")
         assert stack.thickness_m.shape == (4,)
-        assert stack.cavity_index == 2
-
-    def test_cavity_override(self):
-        overridden = load_roof_layers(cavity_r_m2k_w=0.23)
-        raw = load_roof_layers(cavity_r_m2k_w=None)
-        assert overridden.r_value_m2k_w[2] == pytest.approx(0.23)
-        assert raw.r_value_m2k_w[2] != pytest.approx(0.23)
+        assert stack.cavity_index == 1
 
     def test_areal_heat_capacity(self, stack):
         expected = stack.density_kg_m3 * stack.heat_capacity_j_kgk * stack.thickness_m
         np.testing.assert_allclose(stack.areal_heat_capacity_j_m2k, expected)
 
+    def test_emissivity_parsed_per_material(self, stack):
+        assert stack.emissivity == pytest.approx(0.9)
+        assert stack.emissivity_cool == pytest.approx(0.875)
+        terracotta = load_roof_layers(ROOF_LAYERS_TERRACOTTA_CSV)
+        assert terracotta.emissivity_cool == pytest.approx(0.880)
+        slate = load_roof_layers(ROOF_LAYERS_SLATE_CSV)
+        assert slate.emissivity_cool == pytest.approx(0.880)
+        assert slate.cavity_index == 1
+
+    def test_emissivity_defaults_when_columns_absent(self, tmp_path):
+        csv = tmp_path / "no_emissivity.csv"
+        csv.write_text(
+            "Material_type,Thickness_m,Density_Kg_m3,Spec_Heat_Cap_J_KgK,R_value_m2K_W,Layer_Role\n"
+            "A,0.01,1,1,0.1,outer_skin\nB,0.01,1,1,0.1,airspace\n"
+            "C,0.01,1,1,0.1,insulation\nD,0.01,1,1,0.1,inner_lining\n"
+        )
+        parsed = load_roof_layers(csv)
+        assert parsed.emissivity == pytest.approx(HEAT_INGRESS_ROOF_EMISSIVITY)
+        assert parsed.emissivity_cool == pytest.approx(HEAT_INGRESS_ROOF_EMISSIVITY)
+
     def test_tile_stack_loads_and_has_more_mass_than_steel(self, stack):
-        tile = load_roof_layers(ROOF_LAYERS_TILE_CSV, cavity_r_m2k_w=0.23)
+        tile = load_roof_layers(ROOF_LAYERS_TILE_CSV)
         assert tile.thickness_m.shape == (4,)
-        assert tile.layer_names[0].lower().startswith("concrete") or "tile" in tile.layer_names[0].lower()
-        assert tile.cavity_index == 1  # roof space sits directly under the tile
-        # A tile roof's outer skin has far more thermal mass than a thin steel deck.
+        assert tile.layer_names[0].lower().startswith("concrete")
+        assert tile.cavity_index == 1
+        # A concrete tile roof's outer skin has far more thermal mass than a
+        # thin steel deck.
         assert tile.areal_heat_capacity_j_m2k[0] > 10 * stack.areal_heat_capacity_j_m2k[0]
 
     def test_layer_role_validation(self, tmp_path):
@@ -144,13 +212,21 @@ class TestRoofStack:
 
 
 class TestStackSelection:
-    def test_tile_materials_map_to_tile(self):
-        assert stack_for_material("terracotta") == "tile"
-        assert stack_for_material("concrete_tile") == "tile"
-        assert stack_for_material("Terracotta") == "tile"  # case-insensitive
+    def test_tile_materials_map_to_their_own_stack(self):
+        assert stack_for_material("terracotta") == "terracotta"
+        assert stack_for_material("Terracotta") == "terracotta"  # case-insensitive
+        assert stack_for_material("concrete_tile") == "concrete"
+        assert stack_for_material("roof_tiles") == "concrete"  # ambiguous OSM tag
+
+    def test_slate_maps_to_its_own_stack(self):
+        assert stack_for_material("slate") == "slate"
+
+    def test_metal_variants_map_to_metal(self):
+        for material in ("metal_dark", "metal_light", "metal", "metal_sheet"):
+            assert stack_for_material(material) == "metal"
 
     def test_everything_else_maps_to_metal(self):
-        for material in ("metal_dark", "metal_light", "other", None, "yes"):
+        for material in ("other", None, "yes", "glass", "wood"):
             assert stack_for_material(material) == "metal"
 
 
@@ -175,12 +251,21 @@ class TestWeather:
         high = build_hourly_weather(weather_df, roof_height_m=12.0)
         assert high.h_ext_w_m2k.mean() > low.h_ext_w_m2k.mean()
 
+    def test_humidity_passthrough(self, weather_df, weather):
+        np.testing.assert_allclose(
+            weather.humidity_percent, weather_df["rel_humidity_percent"].to_numpy()
+        )
+
+    def test_hour_of_day_in_range(self, weather):
+        assert weather.hour_of_day.min() >= 0.0
+        assert weather.hour_of_day.max() < 24.0
+
 
 # ── Stability ───────────────────────────────────────────────────────────────
 class TestStability:
-    def test_max_timestep_positive_and_cavity_limited(self, stack, weather):
+    def test_max_timestep_positive_and_finite(self, stack, weather):
         dt_max = max_stable_timestep(stack, float(weather.h_ext_w_m2k.max()))
-        assert 20.0 < dt_max < 60.0  # cavity layer bound, ~42 s in the notebook
+        assert 0.0 < dt_max < 3600.0
 
     def test_resolve_timestep_clamps(self, stack):
         # Absurd h_ext forces the limit well below the 40 s nominal.
@@ -220,6 +305,27 @@ class TestMarch:
         dark = march_interior_flux(weather, stack, 0.9, dt_s=40.0).sum()
         light = march_interior_flux(weather, stack, 0.3, dt_s=40.0).sum()
         assert dark > light
+
+    def test_cool_emissivity_changes_flux(self, weather, stack):
+        # Same absorptance, only the outer-skin emissivity differs -> the
+        # long-wave sky-exchange term must move the result.
+        base = march_interior_flux(weather, stack, 0.8, dt_s=40.0, emissivity=stack.emissivity)
+        cool = march_interior_flux(weather, stack, 0.8, dt_s=40.0, emissivity=stack.emissivity_cool)
+        assert not np.allclose(base, cool)
+
+    def test_rejects_non_standard_cavity_position(self, weather):
+        bad = him.RoofStack(
+            layer_names=("A", "B", "C", "D"),
+            thickness_m=np.array([0.01, 0.01, 0.01, 0.01]),
+            density_kg_m3=np.array([1.0, 1.0, 1.0, 1.0]),
+            heat_capacity_j_kgk=np.array([1.0, 1.0, 1.0, 1.0]),
+            r_value_m2k_w=np.array([0.1, 0.1, 0.1, 0.1]),
+            cavity_index=2,
+            emissivity=0.9,
+            emissivity_cool=0.875,
+        )
+        with pytest.raises(ValueError):
+            march_interior_flux(weather, bad, 0.8, dt_s=40.0)
 
 
 # ── Annual benefit ──────────────────────────────────────────────────────────
@@ -318,29 +424,146 @@ class TestRunModel:
         )
         out = run_model(df, weather_df)
         assert out.loc[0, "roof_construction"] == "metal"
-        assert out.loc[1, "roof_construction"] == "tile"
+        assert out.loc[1, "roof_construction"] == "terracotta"
 
         # Different thermal mass -> different (unrounded) hourly flux for the
         # same absorptance/weather. The tile's outer skin has far more mass, so
         # its flux trace should be damped relative to the thin steel deck's.
-        metal_stack, tile_stack = load_roof_layers(), load_roof_layers(ROOF_LAYERS_TILE_CSV)
+        metal_stack, terracotta_stack = load_roof_layers(), load_roof_layers(ROOF_LAYERS_TERRACOTTA_CSV)
         weather = build_hourly_weather(weather_df)
         dt = resolve_timestep(metal_stack, float(weather.h_ext_w_m2k.max()))
         metal_flux = march_interior_flux(weather, metal_stack, 0.85, dt_s=dt)
-        tile_flux = march_interior_flux(weather, tile_stack, 0.85, dt_s=dt)
-        assert not np.allclose(metal_flux, tile_flux)
-        # steel swings harder hour-to-hour (less thermal mass to damp the response);
-        # hour-to-hour deltas isolate that better than overall std, which also
-        # carries the mean level and is sensitive to the heating/cooling setpoint mix.
-        assert np.diff(metal_flux, axis=0).std() > np.diff(tile_flux, axis=0).std()
+        terracotta_flux = march_interior_flux(weather, terracotta_stack, 0.85, dt_s=dt)
+        # Adaptive convection now couples the airspace tightly to its neighbours
+        # on both sides, so the two constructions' hour-to-hour swing magnitude
+        # is no longer a reliable discriminator (unlike the pre-port fixed-R
+        # model) -- only that the two constructions produce genuinely different
+        # results is asserted here.
+        assert not np.allclose(metal_flux, terracotta_flux)
 
-    def test_default_stacks_cover_only_terracotta_and_concrete(self, weather_df):
+    def test_default_stacks_cover_four_materials(self, weather_df):
         df = pd.DataFrame(
             {
-                "absorptance_before": [0.6, 0.6, 0.6],
-                "roof_surface_area_m2": [100.0, 100.0, 100.0],
-                "roof_material": ["terracotta", "concrete_tile", "metal_light"],
+                "absorptance_before": [0.6, 0.6, 0.6, 0.6],
+                "roof_surface_area_m2": [100.0, 100.0, 100.0, 100.0],
+                "roof_material": ["terracotta", "concrete_tile", "metal_light", "slate"],
             },
         )
         out = run_model(df, weather_df)
-        assert list(out["roof_construction"]) == ["tile", "tile", "metal"]
+        assert list(out["roof_construction"]) == ["terracotta", "concrete", "metal", "slate"]
+
+
+# ── Insulation-upgrade scenario (opt-in) ─────────────────────────────────────
+class TestInsulationMarch:
+    def test_default_insulation_matches_stack(self, weather, stack):
+        # Not passing an override should be identical to passing the stack's
+        # own current R-value/thickness explicitly.
+        default = march_interior_flux(weather, stack, 0.8, dt_s=40.0)
+        explicit = march_interior_flux(
+            weather, stack, 0.8, dt_s=40.0,
+            insulation_r_m2k_w=stack.r_value_m2k_w[2],
+            insulation_thickness_m=stack.thickness_m[2],
+        )
+        np.testing.assert_allclose(default, explicit)
+
+    def test_higher_insulation_r_dampens_flux_magnitude(self, weather, stack):
+        # Same absorptance; only insulation R differs. Better insulation
+        # should shrink the magnitude of interior heat flow (both directions).
+        base = march_interior_flux(weather, stack, 0.8, dt_s=40.0)
+        upgraded = march_interior_flux(
+            weather, stack, 0.8, dt_s=40.0, insulation_r_m2k_w=INSULATION_UPGRADE_R_M2K_W,
+        )
+        assert np.abs(upgraded).sum() < np.abs(base).sum()
+
+    def test_insulation_r_accepts_per_building_array(self, weather, stack):
+        r_values = np.array([2.5, 4.1, 6.0])
+        out = march_interior_flux(
+            weather, stack, np.full(3, 0.8), dt_s=40.0, insulation_r_m2k_w=r_values,
+        )
+        # Higher R -> smaller-magnitude flux, monotonically, at the same absorptance.
+        magnitudes = np.abs(out).sum(axis=0)
+        assert magnitudes[0] > magnitudes[1] > magnitudes[2]
+
+
+class TestAnnualBenefitInsulation:
+    def _flux_pair(self, weather, stack, r_upgrade=INSULATION_UPGRADE_R_M2K_W):
+        base = march_interior_flux(weather, stack, np.array([0.8]), dt_s=40.0)
+        upgrade = march_interior_flux(
+            weather, stack, np.array([0.8]), dt_s=40.0, insulation_r_m2k_w=r_upgrade,
+        )
+        return base, upgrade
+
+    def test_output_columns(self, weather, stack):
+        base, upgrade = self._flux_pair(weather, stack)
+        out = annual_benefit_insulation(base, upgrade, weather, [100.0])
+        assert list(out.columns) == list(_INSULATION_OUTPUT_COLUMNS)
+        assert len(out) == 1
+
+    def test_savings_non_negative_in_both_seasons(self, weather, stack):
+        # Unlike annual_benefit's cool-roof penalty, insulation should never
+        # show a negative-clamped-to-zero season when R genuinely improves.
+        base, upgrade = self._flux_pair(weather, stack)
+        out = annual_benefit_insulation(base, upgrade, weather, [100.0], spin_up_hours=0)
+        row = out.iloc[0]
+        assert row["insulation_cooling_saved_thermal_kwh_yr"] >= 0.0
+        assert row["insulation_heating_saved_thermal_kwh_yr"] >= 0.0
+        assert row["insulation_net_electricity_saved_kwh_yr"] >= 0.0
+
+    def test_no_change_saves_nothing(self, weather, stack):
+        # Upgrading to the *same* R-value as the base is a no-op.
+        base, same = self._flux_pair(weather, stack, r_upgrade=float(stack.r_value_m2k_w[2]))
+        out = annual_benefit_insulation(base, same, weather, [100.0])
+        assert out["insulation_net_electricity_saved_kwh_yr"].iloc[0] == 0.0
+
+    def test_downgrade_saves_nothing(self, weather, stack):
+        # A worse R-value than the base is clamped to zero saving, not a
+        # negative number -- annual_benefit_insulation reports upgrades only.
+        base, worse = self._flux_pair(weather, stack, r_upgrade=1.0)
+        out = annual_benefit_insulation(base, worse, weather, [100.0])
+        assert out["insulation_net_electricity_saved_kwh_yr"].iloc[0] == 0.0
+
+    def test_more_area_scales_savings_linearly(self, weather, stack):
+        base, upgrade = self._flux_pair(weather, stack)
+        small = annual_benefit_insulation(base, upgrade, weather, [10_000.0], spin_up_hours=0)
+        big = annual_benefit_insulation(base, upgrade, weather, [40_000.0], spin_up_hours=0)
+        assert big["insulation_net_electricity_saved_kwh_yr"].iloc[0] == pytest.approx(
+            4.0 * small["insulation_net_electricity_saved_kwh_yr"].iloc[0], rel=1e-3
+        )
+
+
+class TestRunModelInsulation:
+    def test_off_by_default_unchanged_columns(self, weather_df, stack):
+        df = pd.DataFrame(
+            {"absorptance_before": [0.8], "roof_surface_area_m2": [120.0]},
+        )
+        out = run_model(df, weather_df, roof_stack=stack)
+        assert list(out.columns) == ["roof_construction", *_OUTPUT_COLUMNS]
+
+    def test_opt_in_adds_insulation_columns(self, weather_df, stack):
+        df = pd.DataFrame(
+            {"absorptance_before": [0.8], "roof_surface_area_m2": [120.0]},
+        )
+        out = run_model(
+            df, weather_df, roof_stack=stack,
+            insulation_r_upgrade_m2k_w=INSULATION_UPGRADE_R_M2K_W,
+            insulation_thickness_upgrade_m=INSULATION_UPGRADE_THICKNESS_M,
+        )
+        assert list(out.columns) == [
+            "roof_construction", *_OUTPUT_COLUMNS, *_INSULATION_OUTPUT_COLUMNS,
+        ]
+        assert np.isfinite(out["insulation_net_electricity_saved_kwh_yr"].to_numpy()).all()
+        # The cool-roof columns must be unaffected by the extra scenario.
+        baseline = run_model(df, weather_df, roof_stack=stack)
+        pd.testing.assert_series_equal(
+            out["net_electricity_saved_kwh_yr"], baseline["net_electricity_saved_kwh_yr"]
+        )
+
+    def test_insulation_upgrade_saves_something_for_a_dark_roof(self, weather_df, stack):
+        df = pd.DataFrame(
+            {"absorptance_before": [0.85], "roof_surface_area_m2": [150.0]},
+        )
+        out = run_model(
+            df, weather_df, roof_stack=stack,
+            insulation_r_upgrade_m2k_w=INSULATION_UPGRADE_R_M2K_W,
+        )
+        assert out["insulation_net_electricity_saved_kwh_yr"].iloc[0] > 0.0

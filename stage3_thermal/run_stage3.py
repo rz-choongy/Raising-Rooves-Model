@@ -10,6 +10,7 @@ Usage:
     python -m stage3_thermal.run_stage3 --suburb Carlton
     python -m stage3_thermal.run_stage3 --suburb Carlton --year 2007 --debug
     python -m stage3_thermal.run_stage3 --suburb Carlton --weather-csv path/to/hourly.csv
+    python -m stage3_thermal.run_stage3 --suburb Carlton --insulation-r-upgrade 4.1
     python -m stage3_thermal.run_stage3 --list-suburbs
 
 Prerequisites:
@@ -29,7 +30,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from config.settings import HEAT_INGRESS_REFERENCE_YEAR
+from config.settings import (
+    HEAT_INGRESS_REFERENCE_YEAR,
+    INSULATION_UPGRADE_R_M2K_W,
+    INSULATION_UPGRADE_THICKNESS_M,
+)
 from config.suburbs import list_suburbs
 from shared.logging_config import setup_logging
 from stage3_thermal.pipeline import run_stage3
@@ -55,6 +60,30 @@ def main() -> None:
         type=str,
         default=None,
         help="Explicit hourly BARRA2 weather CSV (overrides auto-resolution)",
+    )
+    parser.add_argument(
+        "--insulation-r-upgrade",
+        type=float,
+        default=None,
+        metavar="R_M2K_W",
+        help=(
+            "Opt-in: also march an insulation-upgrade scenario at this "
+            f"R-value (m2K/W; e.g. {INSULATION_UPGRADE_R_M2K_W} matches the "
+            "reference notebook's own Insulation_new row), same absorptance/"
+            "emissivity as the current roof. Adds insulation_* columns; "
+            "omit to leave Stage 3's output unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--insulation-thickness-upgrade",
+        type=float,
+        default=None,
+        metavar="THICKNESS_M",
+        help=(
+            "Paired thickness (m) for --insulation-r-upgrade (default: keep "
+            f"the stack's own thickness; {INSULATION_UPGRADE_THICKNESS_M} "
+            "matches the reference notebook's Insulation_new row)."
+        ),
     )
     parser.add_argument(
         "--debug",
@@ -87,6 +116,8 @@ def main() -> None:
             suburb_name=args.suburb,
             weather_csv=Path(args.weather_csv) if args.weather_csv else None,
             year=args.year,
+            insulation_r_upgrade_m2k_w=args.insulation_r_upgrade,
+            insulation_thickness_upgrade_m=args.insulation_thickness_upgrade,
         )
         if df.empty:
             logger.warning("No results produced. Check logs for details.")

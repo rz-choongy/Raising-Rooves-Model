@@ -167,16 +167,22 @@ HEAT_INGRESS_REFERENCE_YEAR = 2007
 HEAT_INGRESS_HEATING_SETPOINT_C = 18.0
 HEAT_INGRESS_COOLING_SETPOINT_C = 20.0
 
-# Long-wave emissivity of the outer roof surface (Stephan-Boltzmann sky exchange).
+# Long-wave emissivity of the outer roof surface (Stephan-Boltzmann sky exchange)
+# at the building's current absorptance. Identical across every committed roof
+# material (see Input Tables/*.csv) — only the cool-roof value
+# (RoofStack.emissivity_cool) varies by material.
 HEAT_INGRESS_ROOF_EMISSIVITY = 0.9
-
-# Internal-surface convection coefficient (W/m²K) between the ceiling and indoor
-# air used by the transient march (notebook `hi`).
-HEAT_INGRESS_INTERNAL_H_W_M2K = 3.0
 
 # Roof height above ground (m) for the wind-speed height correction. Stage 1 has
 # no reliable per-building height, so this is a fixed suburban assumption.
 HEAT_INGRESS_ROOF_HEIGHT_M = 6.0
+
+# Roof pitch (degrees) used only by the cavity's adaptive natural-convection
+# coefficient (h_cav_a's cos(tilt) term, Final_Heat_Ingress_Model.ipynb). Stage 1
+# carries a real per-building pitch_deg, but the reference notebook itself still
+# treats tilt as a single placeholder pending Table 2 integration ("Later this
+# should come from Table 2") — this mirrors that scoping rather than exceeding it.
+HEAT_INGRESS_ROOF_TILT_DEG = 20.0
 
 # Nominal forward-Euler solver timestep (s). Clamped down at run time if the
 # stability limit over the actual weather series is tighter (cavity-layer bound).
@@ -185,11 +191,30 @@ HEAT_INGRESS_SOLVER_DT_S = 40
 # Hours of simulation discarded as thermal spin-up before results are integrated.
 HEAT_INGRESS_SPINUP_HOURS = 48
 
-# Layered roof constructions the model marches heat through, both committed to
-# the repo so a clone runs Stage 3 offline. Which stack a building uses is
+# Layered roof constructions the model marches heat through, all four committed
+# to the repo so a clone runs Stage 3 offline. Which stack a building uses is
 # selected by roof_material (stage3_thermal.heat_ingress_model.stack_for_material).
+# Values ported from Final_Heat_Ingress_Model.ipynb's Roof_layers table
+# (2026-09-19) — each material now carries its own outer-skin thickness/density/
+# heat capacity/R-value/emissivity instead of the two lumped "metal" / "tile"
+# constructions used previously.
 ROOF_LAYERS_CSV = PROJECT_ROOT / "Input Tables" / "Regular_Roof.csv"  # steel deck (default)
-ROOF_LAYERS_TILE_CSV = PROJECT_ROOT / "Input Tables" / "Tile_Roof.csv"  # terracotta / concrete tile
+ROOF_LAYERS_TILE_CSV = PROJECT_ROOT / "Input Tables" / "Tile_Roof.csv"  # concrete tile
+ROOF_LAYERS_TERRACOTTA_CSV = PROJECT_ROOT / "Input Tables" / "Terracotta_Roof.csv"
+ROOF_LAYERS_SLATE_CSV = PROJECT_ROOT / "Input Tables" / "Slate_Roof.csv"
+
+# Insulation-upgrade scenario (opt-in via run_model's insulation_r_upgrade_m2k_w
+# / insulation_thickness_upgrade_m -- off by default, existing behaviour and
+# output columns are unchanged unless a caller asks for this). Values are
+# Final_Heat_Ingress_Model.ipynb's own two named insulation rows:
+# Insulation_old (R2.5, 130 mm -- the four committed stacks' current default)
+# vs Insulation_new (R4.1, 215 mm, same density/heat capacity — a thicker
+# batt of the same bulk material, not a different one). Neither is tied to
+# any real per-building retrofit data; this lets Stage 3 compare "repaint the
+# roof" against "add more ceiling insulation" as two scenario interventions,
+# same status as COOL_ROOF_ABSORPTANCE.
+INSULATION_UPGRADE_R_M2K_W = 4.1
+INSULATION_UPGRADE_THICKNESS_M = 0.215
 
 # Outdoor surface film coefficient h_ext is computed hour-to-hour from the local
 # BARRA2 wind speed via the McAdams (1954) simple forced-convection correlation
