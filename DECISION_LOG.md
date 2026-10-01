@@ -36,13 +36,29 @@ in the code. The 0.55 metal light/dark split only affects `roof_type` for
 unlabelled roofs and sits between the classifier's own bands (metal_light
 needs V > 0.75 → α < 0.39; metal_dark V < 0.5 → α > 0.58).
 
-**Method difference found (not changed):** Maggie's notebook decides each
-hour's mode from the sign of the roof heat flux and leaves hours where the
-normal and cool roofs disagree (one heating, one cooling) as NaN. The
-pipeline splits hours on outdoor temp ≥ 18 °C and counts every hour. On
-Carlton 2007 weather that is 1,100–2,700 disagreeing hours a year, and
-Maggie's method gives roughly half the pipeline's cooling-season saving.
-Needs Maggie's view before choosing.
+**Cooling/heating hour split — both methods reported, outdoor-temp split is
+the headline.** Maggie's notebook decides each hour's mode from the sign of
+the roof heat flux and leaves hours where the normal and cool roofs disagree
+as NaN; the pipeline splits on outdoor temp ≥ 18 °C and counts every hour.
+Stage 3 now outputs both: headline columns (outdoor split) plus
+`*_fluxsign` columns and `roof_flux_mode_mismatch_hours`.
+
+Why the outdoor split stays the headline: the march already holds the room
+at a setpoint picked by outdoor temperature (18 °C heating / 20 °C cooling —
+the notebook does the same), i.e. the house's HVAC mode is set by the
+weather, not by the roof. The roof is one load among walls, windows and
+internal gains, so in a cooling hour any reduction in roof heat flow cuts
+the house's cooling load even when the roof alone would be "losing" heat.
+The flux-sign rule treats the roof as the room's only load and discards the
+mismatch hours (20–28 % of the year on Carlton 2007), so it is a lower
+bound. `COOLING_FRACTION`/`HEATING_FRACTION` already discount hours the HVAC
+isn't running.
+
+Carlton sample (30 buildings per material, 2007), net electricity kWh/m²
+roof/yr, outdoor split vs flux-sign: concrete 0.40 vs −0.16, metal_dark
+0.58 vs 0.17, metal_light 0.20 vs −0.28, slate 0.68 vs 0.56, terracotta
+0.58 vs 0.36. The method choice can flip the sign for light roofs, so the
+FYP report should show both.
 
 **Efficiency:** the existing-roof flux is the group's own "current" march
 (reused, not re-marched); metal-roofed groups march Coolmax in the same call,

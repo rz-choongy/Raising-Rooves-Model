@@ -781,6 +781,10 @@ _OUTPUT_COLUMNS = (
     "net_electricity_saved_kwh_yr",
     "co2_electricity_saved_kg_yr",
     "net_co2_electricity_saved_kg_yr",
+    "roof_flux_mode_mismatch_hours",
+    "electricity_saved_kwh_yr_fluxsign",
+    "heating_penalty_electricity_kwh_yr_fluxsign",
+    "net_electricity_saved_kwh_yr_fluxsign",
 )
 
 
@@ -845,6 +849,19 @@ def annual_benefit(
     heating_penalty_elec = heating_kwh * heating_fraction / cop
     net_electricity = electricity_saved - heating_penalty_elec
 
+    # Flux-sign accounting, as in Final_Heat_Ingress_Model.ipynb's hourly
+    # comparison: an hour is "cooling" when both roofs push heat into the room,
+    # "heating" when both pull heat out, and dropped (NaN in the notebook) when
+    # they disagree. Treats the roof as the room's only load, so it is a lower
+    # bound next to the whole-house outdoor-temperature split above.
+    both_in = (base > 0) & (cool > 0)
+    both_out = (base < 0) & (cool < 0)
+    mismatch_hours = (np.sign(base) != np.sign(cool)).sum(axis=0)
+    fs_cooling_kwh = np.maximum(0.0, np.where(both_in, delta_wh_m2, 0.0).sum(axis=0) / 1000.0) * area
+    fs_heating_kwh = np.maximum(0.0, np.where(both_out, delta_wh_m2, 0.0).sum(axis=0) / 1000.0) * area
+    fs_saved = fs_cooling_kwh * cooling_fraction / cop
+    fs_penalty = fs_heating_kwh * heating_fraction / cop
+
     base_kwh_m2 = flux_base[sl].sum(axis=0) / 1000.0
     cool_kwh_m2 = flux_cool[sl].sum(axis=0) / 1000.0
 
@@ -861,6 +878,10 @@ def annual_benefit(
             "net_electricity_saved_kwh_yr": np.round(net_electricity, 1),
             "co2_electricity_saved_kg_yr": np.round(electricity_saved * co2_factor_kg_kwh, 1),
             "net_co2_electricity_saved_kg_yr": np.round(net_electricity * co2_factor_kg_kwh, 1),
+            "roof_flux_mode_mismatch_hours": mismatch_hours,
+            "electricity_saved_kwh_yr_fluxsign": np.round(fs_saved, 1),
+            "heating_penalty_electricity_kwh_yr_fluxsign": np.round(fs_penalty, 1),
+            "net_electricity_saved_kwh_yr_fluxsign": np.round(fs_saved - fs_penalty, 1),
         }
     )
 

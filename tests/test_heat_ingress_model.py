@@ -675,3 +675,27 @@ class TestRoofTypeAndCoolmax:
         # The coating columns are unchanged by adding the scenario.
         base = run_model(df, weather_df)
         pd.testing.assert_frame_equal(out[base.columns], base)
+
+
+# ── Flux-sign accounting (Maggie's notebook method) ──────────────────────────
+class TestFluxSignAccounting:
+    def test_matches_notebook_hourly_comparison(self, weather):
+        # Synthetic hourly fluxes: both-in (cooling), both-out (heating), and
+        # one mismatch hour that the notebook leaves as NaN.
+        n_hours = weather.n_hours - 1
+        base = np.zeros((n_hours, 1)); cool = np.zeros((n_hours, 1))
+        base[60], cool[60] = 50.0, 20.0     # both into the room: saved 30 Wh
+        base[61], cool[61] = -10.0, -25.0   # both out: cool loses 15 Wh more
+        base[62], cool[62] = 40.0, -5.0     # mismatch: dropped
+        out = annual_benefit(base, cool, weather, [1000.0], ["house"], cooling_fraction=1.0,
+                             heating_fraction=1.0)
+        cop = HVAC_COP_RESIDENTIAL
+        assert out.loc[0, "roof_flux_mode_mismatch_hours"] == 1
+        # notebook: saved_Wh = |normal| - |cool| on same-mode hours
+        assert out.loc[0, "electricity_saved_kwh_yr_fluxsign"] == round(30.0 / cop, 1)  # 30 Wh/m2 x 1000 m2
+        assert out.loc[0, "heating_penalty_electricity_kwh_yr_fluxsign"] == round(15.0 / cop, 1)
+
+    def test_fluxsign_is_a_lower_bound_on_cooling(self, weather, stack):
+        flux = march_interior_flux(weather, stack, np.array([0.9, COOL_ROOF_ABSORPTANCE]), dt_s=40.0)
+        out = annual_benefit(flux[:, :1], flux[:, 1:], weather, [100.0])
+        assert out.loc[0, "electricity_saved_kwh_yr_fluxsign"] <= out.loc[0, "electricity_saved_kwh_yr"]

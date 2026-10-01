@@ -419,6 +419,8 @@ Stage 3 appends these columns to the Stage 2 table:
 | `roof_type` | Pricing roof type: `concrete` / `metal_light` / `metal_dark` / `slate` / `terracotta`. Metal-construction roofs without an explicit light/dark label are split at absorptance 0.55 |
 | `coating_type` | Cool coating applied: `metal_roof_coating` / `concrete_tile_coating` / `terracotta_slate_coating` |
 | `cool_absorptance_applied` / `cool_emissivity_applied` | Audit — the coated absorptance and emissivity this building was marched at |
+| `roof_flux_mode_mismatch_hours` | Hours where the current and cool roofs' heat flow point opposite ways (one heating the room, one cooling it) — Maggie's notebook "discrepancy" flag |
+| `electricity_saved_kwh_yr_fluxsign` / `heating_penalty_electricity_kwh_yr_fluxsign` / `net_electricity_saved_kwh_yr_fluxsign` | Sensitivity: the same saving counted the `Final_Heat_Ingress_Model.ipynb` way — mode from the sign of the roof heat flow, mismatch hours dropped. Roof-only view, so a lower bound; the headline columns use the outdoor-temperature split |
 | `cooling_electricity_saved_kwh_yr_coolmax` / `heating_penalty_electricity_kwh_yr_coolmax` / `net_electricity_saved_kwh_yr_coolmax` | Only with `--coolmax`: electricity effect of re-roofing in Colorbond Coolmax (SR 0.77, α 0.23, ε 0.85) as a complete replacement of the existing roof (existing tile/steel/slate at its current colour − new Coolmax steel deck) |
 | `cooling_season_heat_avoided_kwh_yr` | Interior heat the cool roof keeps out during hours with outdoor temp ≥ 18 °C, × roof surface area |
 | `heating_season_heat_added_kwh_yr` | Wanted winter solar gain the cool roof rejects (hours < 18 °C), × roof surface area |
