@@ -137,8 +137,43 @@ FLAT_PITCH_THRESHOLD_DEG = 5.0
 
 # ── Cool Roof Physics ────────────────────────────────────────────────────────
 
-# Solar absorptance after cool roof coating treatment (target SRI ≥ 78)
+# Generic solar absorptance after cool roof coating treatment (target SRI ≥ 78).
+# Only a fallback now — Stages 2 and 3 use the material-specific coating below
+# (COOL_ROOF_ABSORPTANCE_BY_STACK). Still used when a caller forces a single
+# roof stack, and by tools/seasonal_analysis.py for buildings with no material.
 COOL_ROOF_ABSORPTANCE = 0.20
+
+# Which roof construction ("stack") each Stage 1 roof_material maps to. Shared
+# by Stage 3 (picks the layered construction) and Stages 2/3 (pick the cool
+# coating). `roof_tiles` is an ambiguous raw OSM tag -> concrete tile, the more
+# common of the two. Anything unrecognised -> DEFAULT_ROOF_STACK.
+ROOF_STACK_BY_MATERIAL: dict[str, str] = {
+    "metal_dark": "metal",
+    "metal_light": "metal",
+    "metal": "metal",
+    "metal_sheet": "metal",
+    "concrete_tile": "concrete",
+    "roof_tiles": "concrete",
+    "terracotta": "terracotta",
+    "slate": "slate",
+}
+DEFAULT_ROOF_STACK = "metal"
+
+# Solar absorptance after the cool coating appropriate to each roof type. A
+# cool coating on terracotta/slate cannot reach the same reflectance as one on
+# steel deck or concrete tile, so one global 0.20 overstated the tile/slate
+# saving and understated the metal/concrete one. Values are the
+# Absorptivity_cool column of Final_Heat_Ingress_Model.ipynb's Roof_layers
+# table (the team's reference), keyed like ROOF_STACK_BY_MATERIAL. The paired
+# cool-coating emissivity lives in each stack's CSV (Emissivity_cool).
+# NOTE: Colorbond Coolmax (SR 0.77) would be α = 0.23 for metal — swap the
+# "metal" entry to model that product instead of a white coating.
+COOL_ROOF_ABSORPTANCE_BY_STACK: dict[str, float] = {
+    "metal": 0.068,
+    "concrete": 0.068,
+    "terracotta": 0.14,
+    "slate": 0.14,
+}
 
 # Victorian grid emissions intensity (kg CO2-e per kWh), AEMO 2023
 GRID_EMISSIONS_FACTOR_KG_KWH = 0.79

@@ -50,6 +50,7 @@ from config.settings import (
     PROJECT_ROOT,
 )
 from shared.logging_config import setup_logging
+from stage2_irradiance.cool_roof_calculator import cool_absorptance_for_material
 
 logger = setup_logging("seasonal_analysis")
 
@@ -129,6 +130,11 @@ def compute_monthly_effects(
     Positive = electricity saved (benefit), negative = electricity penalty.
     """
     fraction = _heat_fraction(r_roof)
+    # Coated absorptance appropriate to each roof type (same as Stages 2/3).
+    if "roof_material" in buildings.columns:
+        absorptance_after = buildings["roof_material"].apply(cool_absorptance_for_material)
+    else:
+        absorptance_after = COOL_ROOF_ABSORPTANCE
 
     records = []
     for _, row in climate.iterrows():
@@ -144,9 +150,9 @@ def compute_monthly_effects(
         solar_blocked = (
             ghi_month_kwh_m2
             * buildings["area_m2"]
-            * (buildings["absorptance_before"] - COOL_ROOF_ABSORPTANCE)
+            * (buildings["absorptance_before"] - absorptance_after)
         )
-        # Clamp: already-cool roofs (α <= 0.20) save nothing
+        # Clamp: already-cool roofs (α <= coated α) save nothing
         solar_blocked = solar_blocked.clip(lower=0)
 
         # Heat that reaches the interior through the roof

@@ -6,7 +6,8 @@ coating to each building in a suburb, based on:
   - Roof footprint area and pitch (from Stage 1)
   - Annual solar irradiance at the building's location (from irradiance loader)
   - Current roof absorptance (estimated from roof_colour or roof_material)
-  - Post-treatment absorptance (fixed at COOL_ROOF_ABSORPTANCE = 0.20)
+  - Post-treatment absorptance: the cool coating appropriate to the roof type
+    (COOL_ROOF_ABSORPTANCE_BY_STACK — same lookup Stage 3 uses)
 
 Physics note:
   The energy intercepted by a tilted surface equals GHI × horizontal_footprint_area
@@ -20,7 +21,15 @@ Physics note:
 
 import math
 
-from config.settings import COOL_ROOF_ABSORPTANCE, GRID_EMISSIONS_FACTOR_KG_KWH
+import pandas as pd
+
+from config.settings import (
+    COOL_ROOF_ABSORPTANCE,
+    COOL_ROOF_ABSORPTANCE_BY_STACK,
+    DEFAULT_ROOF_STACK,
+    GRID_EMISSIONS_FACTOR_KG_KWH,
+    ROOF_STACK_BY_MATERIAL,
+)
 
 # ── Absorptance lookup tables ─────────────────────────────────────────────────
 # Sources: CSIRO cool roof research; NatHERS material library; AS/NZS 4859.1
@@ -57,6 +66,13 @@ def _absorptance_from_labels(roof_colour: str | None, roof_material: str | None)
     return ABSORPTANCE_BY_MATERIAL.get(roof_material, 0.75)
 
 
+def cool_absorptance_for_material(roof_material: str | None) -> float:
+    """Post-coating solar absorptance for a roof_material (same mapping as Stage 3)."""
+    label = "" if roof_material is None or pd.isna(roof_material) else str(roof_material).lower().strip()
+    stack = ROOF_STACK_BY_MATERIAL.get(label, DEFAULT_ROOF_STACK)
+    return COOL_ROOF_ABSORPTANCE_BY_STACK.get(stack, COOL_ROOF_ABSORPTANCE)
+
+
 def calculate_building_benefit(
     area_m2: float,
     pitch_deg: float,
@@ -77,7 +93,7 @@ def calculate_building_benefit(
         roof_material: Material string from Stage 1 (may be None).
 
     Returns:
-        Dict with keys: absorptance_before, roof_surface_area_m2,
+        Dict with keys: absorptance_before, absorptance_after, roof_surface_area_m2,
         energy_incident_kwh_yr, energy_saved_kwh_yr, co2_saved_kg_yr.
     """
     pitch_rad = math.radians(max(0.0, min(pitch_deg, 89.0)))
@@ -95,14 +111,16 @@ def calculate_building_benefit(
     else:
         absorptance_before = _absorptance_from_labels(roof_colour, roof_material)
 
-    energy_saved_kwh_yr = energy_incident_kwh_yr * (absorptance_before - COOL_ROOF_ABSORPTANCE)
-    # Clamp: if absorptance_before < COOL_ROOF_ABSORPTANCE (already a cool roof), saving = 0
+    absorptance_after = cool_absorptance_for_material(roof_material)
+    energy_saved_kwh_yr = energy_incident_kwh_yr * (absorptance_before - absorptance_after)
+    # Clamp: if absorptance_before < absorptance_after (already a cool roof), saving = 0
     energy_saved_kwh_yr = max(0.0, energy_saved_kwh_yr)
 
     co2_saved_kg_yr = energy_saved_kwh_yr * GRID_EMISSIONS_FACTOR_KG_KWH
 
     return {
         "absorptance_before": round(absorptance_before, 3),
+        "absorptance_after": round(absorptance_after, 3),
         "roof_surface_area_m2": round(roof_surface_area_m2, 1),
         "energy_incident_kwh_yr": round(energy_incident_kwh_yr, 1),
         "energy_saved_kwh_yr": round(energy_saved_kwh_yr, 1),

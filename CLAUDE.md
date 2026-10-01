@@ -48,7 +48,9 @@ benefits of cool roof interventions across Melbourne suburbs.
 ### Completed (recently)
 
 - Stage 2 cool roof delta calculation with per-building irradiance join.
-  Physics: `energy_saved = GHI * footprint_area * (absorptance_before - 0.20)`.
+  Physics: `energy_saved = GHI * footprint_area * (absorptance_before - absorptance_after)`,
+  where `absorptance_after` is the roof type's cool coating
+  (`COOL_ROOF_ABSORPTANCE_BY_STACK`, shared with Stage 3, 2026-10-01).
   Irradiance priority: BARRA2 OPeNDAP (live since Aug 2026 — no NCI auth
   needed) → BARRA2 hourly CSV (`--barra-csv`) → user CSV → NASA POWER →
   Melbourne default. Output carries an `irradiance_source` column.
@@ -213,8 +215,9 @@ Quick reference:
   `stack_for_material(roof_material)`; output carries a `roof_construction`
   audit column. Sky temperature is a Bliss dew-point correlation; the
   airspace/indoor faces use EnergyPlus adaptive natural convection (not fixed
-  constants). Marches current vs cool absorptance (each at its own
-  material-specific emissivity) over a full hourly BARRA2 year at a two-point
+  constants). Marches current vs cool absorptance (cool coating and emissivity both
+  material-specific — `COOL_ROOF_ABSORPTANCE_BY_STACK`, audit column
+  `cool_absorptance_applied`) over a full hourly BARRA2 year at a two-point
   indoor setpoint (18°C heating / 20°C cooling, switched on outdoor temp —
   `HEAT_INGRESS_HEATING_SETPOINT_C` / `HEAT_INGRESS_COOLING_SETPOINT_C`);
   splits the delta by 18°C outdoor temp into cooling saving vs heating

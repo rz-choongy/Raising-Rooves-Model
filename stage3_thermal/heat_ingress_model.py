@@ -30,7 +30,8 @@ Two physics decisions came from the final notebook port:
     cavity-R override and fixed internal-h constant.
 
 Stage 3 cool-roof saving per building = march the model at the building's current
-solar absorptance and again at ``COOL_ROOF_ABSORPTANCE``, then difference the
+solar absorptance and again at the cool coating appropriate to its roof type
+(``COOL_ROOF_ABSORPTANCE_BY_STACK``), then difference the
 plaster→interior heat flow. Hours with outdoor temp ≥ ``CDD_BASE_TEMP`` count the
 avoided heat as a cooling-season saving; colder hours count it as a heating-season
 penalty (the cool roof also rejects wanted winter solar gain).
@@ -76,7 +77,9 @@ except Exception:  # noqa: BLE001 - numba is optional; fall back to vectorised n
 from config.settings import (
     CDD_BASE_TEMP,
     COOL_ROOF_ABSORPTANCE,
+    COOL_ROOF_ABSORPTANCE_BY_STACK,
     COOLING_FRACTION,
+    DEFAULT_ROOF_STACK,
     GRID_EMISSIONS_FACTOR_KG_KWH,
     H_OUT_WIND_INTERCEPT_W_M2K,
     H_OUT_WIND_SLOPE_W_M2K_PER_MS,
@@ -93,6 +96,7 @@ from config.settings import (
     INSULATION_UPGRADE_R_M2K_W,
     INSULATION_UPGRADE_THICKNESS_M,
     ROOF_LAYERS_CSV,
+    ROOF_STACK_BY_MATERIAL,
     ROOF_LAYERS_SLATE_CSV,
     ROOF_LAYERS_TERRACOTTA_CSV,
     ROOF_LAYERS_TILE_CSV,
@@ -252,24 +256,22 @@ def load_roof_layers(csv_path: str | Path | None = None) -> RoofStack:
 # back to concrete tile, the more common of the two by a wide margin. Anything
 # else unrecognised (`other`, `None`, stray raw OSM values like `metal`/
 # `metal_sheet`/`glass`/`wood`) uses the default metal-deck stack, unchanged
-# from before — per-building solar absorptance still comes from
+# from before — per-building *current* absorptance still comes from
 # `absorptance_before`, not this table, so an unrecognised material only loses
-# construction-level fidelity (thermal mass, emissivity), not absorptance.
-_MATERIAL_STACK_MAP = {
-    "metal_dark": "metal",
-    "metal_light": "metal",
-    "metal": "metal",
-    "metal_sheet": "metal",
-    "concrete_tile": "concrete",
-    "roof_tiles": "concrete",
-    "terracotta": "terracotta",
-    "slate": "slate",
-}
+# construction-level fidelity (thermal mass, emissivity) and is costed with the
+# metal cool coating. The map itself lives in config.settings so Stage 2 picks
+# the same coating per building.
+_MATERIAL_STACK_MAP = ROOF_STACK_BY_MATERIAL
 
 
 def stack_for_material(roof_material) -> str:
     """Return which committed roof stack ('metal'/'concrete'/'terracotta'/'slate') a material uses."""
-    return _MATERIAL_STACK_MAP.get(_normalize_label(roof_material), "metal")
+    return _MATERIAL_STACK_MAP.get(_normalize_label(roof_material), DEFAULT_ROOF_STACK)
+
+
+def cool_absorptance_for_stack(stack_key: str) -> float:
+    """Post-coating solar absorptance for a roof stack (falls back to ``COOL_ROOF_ABSORPTANCE``)."""
+    return COOL_ROOF_ABSORPTANCE_BY_STACK.get(stack_key, COOL_ROOF_ABSORPTANCE)
 
 
 # ── Weather preparation ──────────────────────────────────────────────────────
@@ -795,7 +797,7 @@ def annual_benefit(
     Difference the two marches and roll them up to per-building annual figures.
 
     ``flux_*`` are ``(n_intervals, B)`` Wh/m² arrays from ``march_interior_flux``
-    (base = current absorptance, cool = ``COOL_ROOF_ABSORPTANCE``). The first
+    (base = current absorptance, cool = the roof type's coated absorptance). The first
     ``spin_up_hours`` intervals are discarded as thermal spin-up.
 
     Returns a ``B``-row DataFrame with :data:`_OUTPUT_COLUMNS`.
@@ -960,6 +962,11 @@ def annual_benefit_insulation(
     )
 
 
+# Per-building audit columns run_model prepends: which construction was marched
+# and the cool coating (absorptance, emissivity) it was marched at.
+_AUDIT_COLUMNS = ("roof_construction", "cool_absorptance_applied", "cool_emissivity_applied")
+
+
 def _load_default_stacks() -> dict[str, RoofStack]:
     """The four committed roof stacks, keyed the same way as ``stack_for_material``."""
     return {
@@ -979,7 +986,7 @@ def run_model(
     area_col: str = "roof_surface_area_m2",
     building_type_col: str = "building_type",
     roof_material_col: str = "roof_material",
-    cool_absorptance: float = COOL_ROOF_ABSORPTANCE,
+    cool_absorptance: float | None = None,
     insulation_r_upgrade_m2k_w: float | None = None,
     insulation_thickness_upgrade_m: float | None = None,
 ) -> pd.DataFrame:
@@ -990,8 +997,10 @@ def run_model(
     (``stack_for_material`` -- metal/concrete tile/terracotta tile/slate, each
     with its own outer-skin thickness/density/heat-capacity/R-value/
     emissivity). Buildings are grouped by stack, each group is marched once at
-    its ``absorptance_before`` (current-roof emissivity) and once at
-    ``cool_absorptance`` (the stack's cool-roof emissivity) — stacked into a
+    its ``absorptance_before`` (current-roof emissivity) and once at the
+    cool-coating absorptance appropriate to that roof type
+    (``COOL_ROOF_ABSORPTANCE_BY_STACK``, with the stack's cool-roof
+    emissivity) — stacked into a
     single vectorised march per group, each with its own stability-checked
     timestep — then rolled up to the annual per-building columns.
 
@@ -1000,6 +1009,10 @@ def run_model(
             building), a single ``RoofStack`` (forces every building onto it —
             useful for tests/back-compat), or an explicit ``{"metal": ...,
             "concrete": ...}`` dict.
+        cool_absorptance: ``None`` (default) uses each stack's own coating
+            from ``COOL_ROOF_ABSORPTANCE_BY_STACK`` (``COOL_ROOF_ABSORPTANCE``
+            for a forced single stack). A float overrides it for every
+            building (sensitivity sweeps / tests).
         insulation_r_upgrade_m2k_w: Opt-in third scenario -- ``None`` (default)
             leaves Stage 3's output exactly as before (no insulation columns,
             no extra march). Pass a value (see ``config.settings.
@@ -1052,6 +1065,10 @@ def run_model(
         area = area_all[mask]
         building_type = [building_type_all[i] for i in np.where(mask)[0]]
 
+        group_cool_absorptance = (
+            float(cool_absorptance) if cool_absorptance is not None
+            else cool_absorptance_for_stack(key)
+        )
         test_insulation = insulation_r_upgrade_m2k_w is not None
         n_scenarios = 3 if test_insulation else 2
 
@@ -1060,7 +1077,7 @@ def run_model(
         current_r2 = float(stack.r_value_m2k_w[2])
         current_thickness2 = float(stack.thickness_m[2])
         stacked_absorptance = np.concatenate(
-            [absorptance, np.full(n, float(cool_absorptance))]
+            [absorptance, np.full(n, group_cool_absorptance)]
             + ([absorptance] if test_insulation else [])
         )
         stacked_emissivity = np.concatenate(
@@ -1099,7 +1116,10 @@ def run_model(
             )
             insulation_result.index = group_result.index
             group_result = pd.concat([group_result, insulation_result], axis=1)
-        group_result.insert(0, "roof_construction", key)
+        for i, (col, val) in enumerate(
+            zip(_AUDIT_COLUMNS, (key, group_cool_absorptance, stack.emissivity_cool))
+        ):
+            group_result.insert(i, col, val)
         group_result.index = df.index[mask]
         results.append(group_result)
 
