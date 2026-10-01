@@ -22,12 +22,27 @@ its current absorptance) vs a new Colorbond Coolmax steel-deck roof (SR 0.77 →
 whether Coolmax is worth its premium ($28.45 vs $17.83 per lineal metre, 900 mm
 cover, supplier buy price) when an owner is re-roofing anyway.
 
-**Assumptions to confirm with the team:** the three coating groups and names
-(the notebook gives metal and concrete the same α/ε, terracotta and slate the
-same); the 0.55 absorptance split for unlabelled metal roofs; Coolmax
-emissivity 0.85. Baseline confirmed by Ryan 2026-10-01: existing roof as-is,
-not a standard-Colorbond re-roof. Columns are
-annual (`_yr`) — the economics spec mentions hourly rows, not produced yet.
+**Confirmed in team chat (2026-10-01):** Angus — Coolmax is a complete
+replacement run on every building (existing tile/steel/slate minus new
+Coolmax); the current annual parquet format is fine; everything else OK.
+Seamus — `Final_Heat_Ingress_Model.ipynb` (ported 2026-09-19) is Maggie's
+finalised model ("finalised my code yesterday evening", 2026-09-18).
+
+**Still open (Maggie):** she describes "three different paint types"; her
+committed notebook has only two distinct coated (α, ε) pairs — 0.068/0.875
+(concrete, steel) and 0.14/0.880 (terracotta, slate) — so the three
+`coating_type` names are a best guess. Coolmax emissivity 0.85 is unsourced
+in the code. The 0.55 metal light/dark split only affects `roof_type` for
+unlabelled roofs and sits between the classifier's own bands (metal_light
+needs V > 0.75 → α < 0.39; metal_dark V < 0.5 → α > 0.58).
+
+**Method difference found (not changed):** Maggie's notebook decides each
+hour's mode from the sign of the roof heat flux and leaves hours where the
+normal and cool roofs disagree (one heating, one cooling) as NaN. The
+pipeline splits hours on outdoor temp ≥ 18 °C and counts every hour. On
+Carlton 2007 weather that is 1,100–2,700 disagreeing hours a year, and
+Maggie's method gives roughly half the pipeline's cooling-season saving.
+Needs Maggie's view before choosing.
 
 **Efficiency:** the existing-roof flux is the group's own "current" march
 (reused, not re-marched); metal-roofed groups march Coolmax in the same call,
