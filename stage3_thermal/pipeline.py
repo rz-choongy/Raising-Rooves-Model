@@ -7,6 +7,9 @@ model (``stage3_thermal/heat_ingress_model.py``) for every building, and writes:
   - data/output/stage3_{suburb_key}.csv
 
 Added columns (on top of all Stage 2 columns):
+  roof_construction / roof_type / coating_type — construction marched, pricing
+                                        roof type, and cool coating applied
+  cool_absorptance_applied / cool_emissivity_applied — coating properties
   roof_heat_ingress_base_kwh_m2_yr    — annual interior heat / m² roof, current absorptance
   roof_heat_ingress_cool_kwh_m2_yr    — same, at COOL_ROOF_ABSORPTANCE
   cooling_season_heat_avoided_kwh_yr  — interior heat kept out during warm hours
@@ -35,6 +38,12 @@ insulation_net_electricity_saved_kwh_yr, insulation_net_co2_saved_kg_yr --
 so the insulation lever can be compared against the roof-coating lever
 without silently mixing thermal and electricity units. Off by default; see
 DECISION_LOG.md 2026-09-19.
+
+Passing --coolmax adds a re-roof scenario (every building re-roofed in steel:
+standard Colorbond at its current colour vs Colorbond Coolmax):
+cooling_electricity_saved_kwh_yr_coolmax,
+heating_penalty_electricity_kwh_yr_coolmax,
+net_electricity_saved_kwh_yr_coolmax. See DECISION_LOG.md 2026-10-01.
 """
 
 from __future__ import annotations
@@ -134,6 +143,7 @@ def run_stage3(
     year: int = HEAT_INGRESS_REFERENCE_YEAR,
     insulation_r_upgrade_m2k_w: float | None = None,
     insulation_thickness_upgrade_m: float | None = None,
+    coolmax: bool = False,
 ) -> pd.DataFrame:
     """
     Run the full Stage 3 heat-ingress pipeline for a suburb.
@@ -151,6 +161,8 @@ def run_stage3(
         insulation_thickness_upgrade_m: Paired thickness override for the
             insulation-upgrade scenario (default: keep the stack's own
             thickness).
+        coolmax: Opt-in Colorbond Coolmax re-roof scenario (see
+            ``heat_ingress_model.run_model``). Adds ``*_coolmax`` columns.
 
     Returns:
         DataFrame with all Stage 2 columns plus the Stage 3 thermal columns.
@@ -181,6 +193,7 @@ def run_stage3(
         df, weather_df,
         insulation_r_upgrade_m2k_w=insulation_r_upgrade_m2k_w,
         insulation_thickness_upgrade_m=insulation_thickness_upgrade_m,
+        coolmax=coolmax,
     )
     df = pd.concat([df.reset_index(drop=True), thermal_df.reset_index(drop=True)], axis=1)
 
@@ -225,6 +238,14 @@ def run_stage3(
             "Insulation upgrade (R%.1f): %.0f kWh/yr saved (%.0f/building) vs "
             "%.0f kWh/yr net from the cool-roof coating -- both levers, same roofs.",
             insulation_r_upgrade_m2k_w, total_insulation, per_building_insulation, total_net,
+        )
+
+    if coolmax:
+        logger.info(
+            "Coolmax re-roof: %.0f kWh/yr net per building vs standard Colorbond "
+            "(%.0f kWh/yr suburb total).",
+            df["net_electricity_saved_kwh_yr_coolmax"].mean(),
+            df["net_electricity_saved_kwh_yr_coolmax"].sum(),
         )
 
     # ── Save outputs ──────────────────────────────────────────────────────────

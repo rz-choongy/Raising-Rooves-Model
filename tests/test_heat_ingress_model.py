@@ -42,6 +42,7 @@ from config.settings import (
 from stage3_thermal import heat_ingress_model as him
 from stage3_thermal.heat_ingress_model import (
     _AUDIT_COLUMNS,
+    _COOLMAX_OUTPUT_COLUMNS,
     _DEWPOINT_A,
     _DEWPOINT_B,
     _INSULATION_OUTPUT_COLUMNS,
@@ -61,6 +62,7 @@ from stage3_thermal.heat_ingress_model import (
     march_interior_flux,
     max_stable_timestep,
     resolve_timestep,
+    roof_type_for,
     run_model,
     stack_for_material,
 )
@@ -601,3 +603,61 @@ class TestRunModelInsulation:
             insulation_r_upgrade_m2k_w=INSULATION_UPGRADE_R_M2K_W,
         )
         assert out["insulation_net_electricity_saved_kwh_yr"].iloc[0] > 0.0
+
+
+# ── Pricing columns + Colorbond Coolmax re-roof scenario ─────────────────────
+class TestRoofTypeAndCoolmax:
+    @pytest.mark.parametrize(
+        "material, absorptance, expected",
+        [
+            ("concrete_tile", 0.7, "concrete"),
+            ("roof_tiles", 0.7, "concrete"),
+            ("terracotta", 0.7, "terracotta"),
+            ("slate", 0.9, "slate"),
+            ("metal_light", 0.9, "metal_light"),  # explicit label wins
+            ("metal_dark", 0.3, "metal_dark"),
+            ("other", 0.8, "metal_dark"),          # split on absorptance
+            (None, 0.4, "metal_light"),
+        ],
+    )
+    def test_roof_type_for(self, material, absorptance, expected):
+        assert roof_type_for(material, absorptance) == expected
+
+    def test_roof_and_coating_type_columns(self, weather_df):
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.8, 0.8, 0.4],
+                "roof_surface_area_m2": [100.0] * 3,
+                "roof_material": ["terracotta", "concrete_tile", "other"],
+            }
+        )
+        out = run_model(df, weather_df)
+        assert list(out["roof_type"]) == ["terracotta", "concrete", "metal_light"]
+        assert list(out["coating_type"]) == [
+            "terracotta_slate_coating", "concrete_tile_coating", "metal_roof_coating",
+        ]
+        assert not any(c in out.columns for c in _COOLMAX_OUTPUT_COLUMNS)  # opt-in only
+
+    def test_coolmax_reroof_is_on_steel_for_every_roof(self, weather_df):
+        # Same current absorptance, different current material: the re-roof
+        # replaces both with steel, so the Coolmax columns must match exactly
+        # (exercises both the in-group and the batched non-metal march paths).
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.8, 0.8],
+                "roof_surface_area_m2": [120.0, 120.0],
+                "roof_material": ["metal_dark", "terracotta"],
+            }
+        )
+        out = run_model(df, weather_df, coolmax=True)
+        assert list(out.columns[-3:]) == list(_COOLMAX_OUTPUT_COLUMNS)
+        np.testing.assert_allclose(
+            out.loc[0, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float),
+            out.loc[1, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float),
+        )
+        # Darker standard Colorbond vs Coolmax must move the needle one way or
+        # the other (the short fixture may have no >=18 C cooling hours).
+        assert np.abs(out.loc[0, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float)).sum() > 0
+        # The coating columns are unchanged by adding the scenario.
+        base = run_model(df, weather_df)
+        pd.testing.assert_frame_equal(out[base.columns], base)
