@@ -974,15 +974,15 @@ _COOLMAX_OUTPUT_COLUMNS = (
 
 
 def _coolmax_columns(
-    flux_standard: np.ndarray,
+    flux_existing: np.ndarray,
     flux_coolmax: np.ndarray,
     weather: HourlyWeather,
     area: np.ndarray,
     building_type: list,
     index: pd.Index,
 ) -> pd.DataFrame:
-    """Coolmax-vs-standard-Colorbond electricity columns, via ``annual_benefit``."""
-    out = annual_benefit(flux_standard, flux_coolmax, weather, area, building_type)
+    """Existing-roof-vs-Coolmax-replacement electricity columns, via ``annual_benefit``."""
+    out = annual_benefit(flux_existing, flux_coolmax, weather, area, building_type)
     return pd.DataFrame(
         {
             "cooling_electricity_saved_kwh_yr_coolmax": out["electricity_saved_kwh_yr"].to_numpy(),
@@ -1080,12 +1080,11 @@ def run_model(
             depth) -- see ``config.settings.INSULATION_UPGRADE_THICKNESS_M``
             to instead reproduce the reference notebook's own thicker-batt
             scenario.
-        coolmax: Opt-in re-roof scenario -- "the owner is replacing the roof
-            anyway: is Colorbond Coolmax worth it over standard Colorbond?"
-            Marches every building on the steel-deck construction at its
-            current absorptance (standard Colorbond, similar colour) and at
-            ``COOLMAX_ABSORPTANCE``/``COOLMAX_EMISSIVITY``, adding
-            :data:`_COOLMAX_OUTPUT_COLUMNS`.
+        coolmax: Opt-in re-roof scenario -- a complete replacement of every
+            building's existing roof (its own construction and current
+            absorptance: tile, steel or slate) with a Colorbond Coolmax
+            steel-deck roof (``COOLMAX_ABSORPTANCE``/``COOLMAX_EMISSIVITY``).
+            Adds :data:`_COOLMAX_OUTPUT_COLUMNS` (existing − Coolmax).
 
     Every result carries ``roof_type`` (concrete / metal_light / metal_dark /
     slate / terracotta) and ``coating_type`` (which cool coating was applied,
@@ -1118,16 +1117,15 @@ def run_model(
     )
 
     max_h_ext = float(np.max(weather.h_ext_w_m2k))
-    # Coolmax re-roof scenario: the new roof is steel, so every building is
-    # marched on the metal construction at its current absorptance (a standard
-    # Colorbond replacement in a similar colour) and at Coolmax's. Metal-roofed
-    # buildings get both columns inside their own group march; everyone else
-    # is batched into one extra metal-stack march after the loop.
+    # Coolmax re-roof scenario: a complete replacement, so every building's
+    # existing roof (its own construction and current absorptance — tile,
+    # steel or slate) is compared against a new Coolmax steel-deck roof. The
+    # existing-roof flux is the group's "current" march; metal-roofed groups
+    # march Coolmax in the same call, other groups need one extra steel march.
     coolmax_stack = (
         (stacks.get("metal") or load_roof_layers(ROOF_LAYERS_CSV)) if coolmax else None
     )
     coolmax_results = []
-    pending_reroof = np.zeros(len(df), dtype=bool)
 
     results = []
     for key, stack in stacks.items():
@@ -1166,8 +1164,6 @@ def run_model(
             scenarios["coolmax"] = (
                 COOLMAX_ABSORPTANCE, COOLMAX_EMISSIVITY, current_r2, current_thickness2
             )
-        elif coolmax:
-            pending_reroof |= mask
 
         def _stack_col(i: int) -> np.ndarray:
             return np.concatenate(
@@ -1199,36 +1195,25 @@ def run_model(
         group_result.insert(2, "cool_emissivity_applied", stack.emissivity_cool)
         group_result.index = df.index[mask]
         results.append(group_result)
-        if reroof_in_group:
+        if coolmax:
+            if reroof_in_group:
+                flux_coolmax = cols["coolmax"]
+            else:
+                logger.info(
+                    "Marching %d '%s'-roof buildings re-roofed in Coolmax steel...", n, key,
+                )
+                flux_coolmax = march_interior_flux(
+                    weather, coolmax_stack, np.full(n, COOLMAX_ABSORPTANCE),
+                    dt_s=resolve_timestep(coolmax_stack, max_h_ext),
+                    emissivity=np.full(n, COOLMAX_EMISSIVITY),
+                )
             coolmax_results.append(
-                _coolmax_columns(cols["current"], cols["coolmax"], weather, area,
+                _coolmax_columns(cols["current"], flux_coolmax, weather, area,
                                  building_type, df.index[mask])
             )
 
     result = pd.concat(results).loc[df.index]
-
     if coolmax:
-        if pending_reroof.any():
-            n = int(pending_reroof.sum())
-            absorptance = absorptance_before_all[pending_reroof]
-            area = area_all[pending_reroof]
-            building_type = [building_type_all[i] for i in np.where(pending_reroof)[0]]
-            dt = resolve_timestep(coolmax_stack, max_h_ext)
-            logger.info(
-                "Marching %d non-metal buildings re-roofed in steel × 2 scenarios "
-                "(standard Colorbond, Coolmax) at dt=%.1f s...", n, dt,
-            )
-            flux = march_interior_flux(
-                weather, coolmax_stack,
-                np.concatenate([absorptance, np.full(n, COOLMAX_ABSORPTANCE)]), dt_s=dt,
-                emissivity=np.concatenate(
-                    [np.full(n, coolmax_stack.emissivity), np.full(n, COOLMAX_EMISSIVITY)]
-                ),
-            )
-            coolmax_results.append(
-                _coolmax_columns(flux[:, :n], flux[:, n:], weather, area,
-                                 building_type, df.index[pending_reroof])
-            )
         result = pd.concat([result, pd.concat(coolmax_results).loc[df.index]], axis=1)
 
     material = df[roof_material_col] if roof_material_col in df.columns else [None] * len(df)

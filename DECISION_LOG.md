@@ -10,9 +10,10 @@ Each entry records a method or source choice, why it was made, and what was reje
 metal_dark / slate / terracotta) and `coating_type` (metal_roof_coating /
 concrete_tile_coating / terracotta_slate_coating) on every row, so the
 economics model can price the right coating × `roof_surface_area_m2`. An
-opt-in `--coolmax` flag adds a re-roof scenario: every building is marched on
-the steel-deck construction at its current absorptance (standard Colorbond,
-similar colour) vs Colorbond Coolmax (SR 0.77 → α 0.23, ε 0.85), giving
+opt-in `--coolmax` flag adds a re-roof scenario run on every building as a
+complete replacement: its existing roof (own tile/steel/slate construction at
+its current absorptance) vs a new Colorbond Coolmax steel-deck roof (SR 0.77 →
+α 0.23, ε 0.85), giving
 `cooling_electricity_saved_kwh_yr_coolmax`,
 `heating_penalty_electricity_kwh_yr_coolmax` and
 `net_electricity_saved_kwh_yr_coolmax`.
@@ -23,13 +24,14 @@ cover, supplier buy price) when an owner is re-roofing anyway.
 
 **Assumptions to confirm with the team:** the three coating groups and names
 (the notebook gives metal and concrete the same α/ε, terracotta and slate the
-same); the 0.55 absorptance split for unlabelled metal roofs; the Coolmax
-baseline colour (current roof colour); Coolmax emissivity 0.85. Columns are
+same); the 0.55 absorptance split for unlabelled metal roofs; Coolmax
+emissivity 0.85. Baseline confirmed by Ryan 2026-10-01: existing roof as-is,
+not a standard-Colorbond re-roof. Columns are
 annual (`_yr`) — the economics spec mentions hourly rows, not produced yet.
 
-**Efficiency:** metal-roofed buildings get the Coolmax column inside their
-existing group march (current-roof flux reused as the standard-Colorbond
-baseline); only non-metal buildings need one extra batched steel march.
+**Efficiency:** the existing-roof flux is the group's own "current" march
+(reused, not re-marched); metal-roofed groups march Coolmax in the same call,
+other groups need one extra steel march each.
 
 ---
 

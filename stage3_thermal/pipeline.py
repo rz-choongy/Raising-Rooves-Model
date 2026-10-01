@@ -39,8 +39,9 @@ so the insulation lever can be compared against the roof-coating lever
 without silently mixing thermal and electricity units. Off by default; see
 DECISION_LOG.md 2026-09-19.
 
-Passing --coolmax adds a re-roof scenario (every building re-roofed in steel:
-standard Colorbond at its current colour vs Colorbond Coolmax):
+Passing --coolmax adds a re-roof scenario (every building's existing roof —
+tile, steel or slate at its current colour — vs a complete replacement in
+Colorbond Coolmax steel):
 cooling_electricity_saved_kwh_yr_coolmax,
 heating_penalty_electricity_kwh_yr_coolmax,
 net_electricity_saved_kwh_yr_coolmax. See DECISION_LOG.md 2026-10-01.
@@ -242,7 +243,7 @@ def run_stage3(
 
     if coolmax:
         logger.info(
-            "Coolmax re-roof: %.0f kWh/yr net per building vs standard Colorbond "
+            "Coolmax re-roof: %.0f kWh/yr net per building vs the existing roof "
             "(%.0f kWh/yr suburb total).",
             df["net_electricity_saved_kwh_yr_coolmax"].mean(),
             df["net_electricity_saved_kwh_yr_coolmax"].sum(),

@@ -232,8 +232,9 @@ Quick reference:
   better insulation saves in both seasons with no penalty side
   (`annual_benefit_insulation`).
   Every row carries `roof_type` and `coating_type` for pricing. Opt-in
-  `--coolmax` (2026-10-01) adds a Colorbond Coolmax vs standard Colorbond
-  re-roof scenario on the steel stack (`*_coolmax` columns).
+  `--coolmax` (2026-10-01) adds a complete-replacement scenario: existing
+  roof (own stack, current colour) vs new Colorbond Coolmax steel
+  (`*_coolmax` columns).
 
 ## README Update Rules
 

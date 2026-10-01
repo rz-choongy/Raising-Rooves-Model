@@ -638,10 +638,13 @@ class TestRoofTypeAndCoolmax:
         ]
         assert not any(c in out.columns for c in _COOLMAX_OUTPUT_COLUMNS)  # opt-in only
 
-    def test_coolmax_reroof_is_on_steel_for_every_roof(self, weather_df):
-        # Same current absorptance, different current material: the re-roof
-        # replaces both with steel, so the Coolmax columns must match exactly
-        # (exercises both the in-group and the batched non-metal march paths).
+    def test_coolmax_compares_existing_roof_to_coolmax_steel(self, weather_df):
+        # Complete replacement: existing roof (own construction + current
+        # absorptance) minus a new Coolmax steel roof. Checked independently
+        # for a metal roof (in-group march path) and a terracotta roof
+        # (separate steel march path).
+        from config.settings import COOLMAX_ABSORPTANCE, COOLMAX_EMISSIVITY
+
         df = pd.DataFrame(
             {
                 "absorptance_before": [0.8, 0.8],
@@ -651,13 +654,24 @@ class TestRoofTypeAndCoolmax:
         )
         out = run_model(df, weather_df, coolmax=True)
         assert list(out.columns[-3:]) == list(_COOLMAX_OUTPUT_COLUMNS)
-        np.testing.assert_allclose(
-            out.loc[0, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float),
-            out.loc[1, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float),
+
+        weather = build_hourly_weather(weather_df)
+        steel = load_roof_layers()
+        h_max = float(weather.h_ext_w_m2k.max())
+        coolmax_flux = march_interior_flux(
+            weather, steel, np.array([COOLMAX_ABSORPTANCE]),
+            dt_s=resolve_timestep(steel, h_max), emissivity=COOLMAX_EMISSIVITY,
         )
-        # Darker standard Colorbond vs Coolmax must move the needle one way or
-        # the other (the short fixture may have no >=18 C cooling hours).
-        assert np.abs(out.loc[0, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float)).sum() > 0
+        for row, stack in [(0, steel), (1, load_roof_layers(ROOF_LAYERS_TERRACOTTA_CSV))]:
+            existing = march_interior_flux(
+                weather, stack, np.array([0.8]), dt_s=resolve_timestep(stack, h_max),
+            )
+            expected = annual_benefit(existing, coolmax_flux, weather, [120.0])
+            np.testing.assert_allclose(
+                out.loc[row, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float),
+                expected[["electricity_saved_kwh_yr", "heating_penalty_electricity_kwh_yr",
+                          "net_electricity_saved_kwh_yr"]].to_numpy(float)[0],
+            )
         # The coating columns are unchanged by adding the scenario.
         base = run_model(df, weather_df)
         pd.testing.assert_frame_equal(out[base.columns], base)

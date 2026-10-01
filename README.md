@@ -419,7 +419,7 @@ Stage 3 appends these columns to the Stage 2 table:
 | `roof_type` | Pricing roof type: `concrete` / `metal_light` / `metal_dark` / `slate` / `terracotta`. Metal-construction roofs without an explicit light/dark label are split at absorptance 0.55 |
 | `coating_type` | Cool coating applied: `metal_roof_coating` / `concrete_tile_coating` / `terracotta_slate_coating` |
 | `cool_absorptance_applied` / `cool_emissivity_applied` | Audit — the coated absorptance and emissivity this building was marched at |
-| `cooling_electricity_saved_kwh_yr_coolmax` / `heating_penalty_electricity_kwh_yr_coolmax` / `net_electricity_saved_kwh_yr_coolmax` | Only with `--coolmax`: electricity effect of re-roofing in Colorbond Coolmax (SR 0.77, α 0.23, ε 0.85) instead of standard Colorbond at the building's current colour, both on the steel-deck construction |
+| `cooling_electricity_saved_kwh_yr_coolmax` / `heating_penalty_electricity_kwh_yr_coolmax` / `net_electricity_saved_kwh_yr_coolmax` | Only with `--coolmax`: electricity effect of re-roofing in Colorbond Coolmax (SR 0.77, α 0.23, ε 0.85) as a complete replacement of the existing roof (existing tile/steel/slate at its current colour − new Coolmax steel deck) |
 | `cooling_season_heat_avoided_kwh_yr` | Interior heat the cool roof keeps out during hours with outdoor temp ≥ 18 °C, × roof surface area |
 | `heating_season_heat_added_kwh_yr` | Wanted winter solar gain the cool roof rejects (hours < 18 °C), × roof surface area |
 | `cooling_fraction_applied` / `hvac_cop` | Audit — `COOLING_FRACTION` and COP by building type |
@@ -497,10 +497,10 @@ per-m² result × `roof_surface_area_m2`.
 | Roof tilt (airspace's outer-facing convection only) | 20° | `HEAT_INGRESS_ROOF_TILT_DEG` — single global value, like the reference notebook; not yet per-building `pitch_deg` |
 
 **Colorbond Coolmax re-roof scenario (opt-in):** `--coolmax` answers "if the
-owner is re-roofing anyway, is Coolmax worth it over standard Colorbond?".
-Every building, whatever its current roof, is marched as a new steel-deck roof
-twice: at its current absorptance (standard Colorbond in a similar colour) and
-at Coolmax's (`COOLMAX_*` in `config/settings.py`). Adds the three `*_coolmax`
+owner is re-roofing anyway, how much does a Coolmax roof save?". It runs on
+every building as a complete replacement: the existing roof (its own
+tile/steel/slate construction at its current absorptance) vs a new Colorbond
+Coolmax steel-deck roof (`COOLMAX_*` in `config/settings.py`). Adds the three `*_coolmax`
 columns. No dollar costing is done in the pipeline — pricing per `coating_type`
 / `roof_type` × `roof_surface_area_m2` is left to the economics model.
 

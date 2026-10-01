@@ -193,8 +193,9 @@ ROOF_TYPE_METAL_DARK_MIN_ABSORPTANCE = 0.55
 
 # Colorbond Coolmax re-roof scenario (run_stage3 --coolmax). Supplier-quoted
 # solar reflectance 0.77 -> absorptance 0.23. Thermal emittance 0.85 is
-# BlueScope's published figure for COLORBOND steel. The baseline is a
-# standard Colorbond re-roof at the building's current absorptance.
+# BlueScope's published figure for COLORBOND steel. Complete replacement: the
+# baseline is each building's existing roof (own construction + current
+# absorptance), the scenario a new Coolmax steel-deck roof.
 COOLMAX_SOLAR_REFLECTANCE = 0.77
 COOLMAX_ABSORPTANCE = round(1.0 - COOLMAX_SOLAR_REFLECTANCE, 3)
 COOLMAX_EMISSIVITY = 0.85

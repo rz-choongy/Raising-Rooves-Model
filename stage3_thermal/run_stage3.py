@@ -89,9 +89,9 @@ def main() -> None:
         "--coolmax",
         action="store_true",
         help=(
-            "Opt-in re-roof scenario: also march every building as a new steel "
-            "roof in standard Colorbond (current colour) vs Colorbond Coolmax "
-            "(SR 0.77). Adds *_coolmax columns."
+            "Opt-in re-roof scenario: compare every building's existing roof "
+            "(tile/steel/slate, current colour) against a complete replacement "
+            "in Colorbond Coolmax steel (SR 0.77). Adds *_coolmax columns."
         ),
     )
     parser.add_argument(
