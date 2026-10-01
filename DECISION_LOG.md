@@ -31,8 +31,11 @@ finalised model ("finalised my code yesterday evening", 2026-09-18).
 **Still open (Maggie):** she describes "three different paint types"; her
 committed notebook has only two distinct coated (α, ε) pairs — 0.068/0.875
 (concrete, steel) and 0.14/0.880 (terracotta, slate) — so the three
-`coating_type` names are a best guess. Coolmax emissivity 0.85 is unsourced
-in the code. The 0.55 metal light/dark split only affects `roof_type` for
+`coating_type` names are a best guess — no paint names appear anywhere in
+the repo, its history, the notebooks' saved outputs or the team Drive.
+Coolmax emissivity 0.85 kept (Ryan, 2026-10-01); it matches the thermal
+emittance in `Input Tables/material_properties_table4.csv` (Cool Roof Cost
+Benefit Analysis Vol 4). The 0.55 metal light/dark split only affects `roof_type` for
 unlabelled roofs and sits between the classifier's own bands (metal_light
 needs V > 0.75 → α < 0.39; metal_dark V < 0.5 → α > 0.58).
 
