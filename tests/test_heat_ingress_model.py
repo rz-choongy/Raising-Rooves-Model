@@ -26,6 +26,7 @@ import pytest
 
 from config.settings import (
     COOL_ROOF_ABSORPTANCE,
+    COOL_ROOF_ABSORPTANCE_BY_STACK,
     HEAT_INGRESS_COOLING_SETPOINT_C,
     HEAT_INGRESS_HEATING_SETPOINT_C,
     HEAT_INGRESS_ROOF_EMISSIVITY,
@@ -40,6 +41,7 @@ from config.settings import (
 )
 from stage3_thermal import heat_ingress_model as him
 from stage3_thermal.heat_ingress_model import (
+    _AUDIT_COLUMNS,
     _DEWPOINT_A,
     _DEWPOINT_B,
     _INSULATION_OUTPUT_COLUMNS,
@@ -405,7 +407,7 @@ class TestRunModel:
         )
         out = run_model(df, weather_df, roof_stack=stack)
         assert list(out.index) == [10, 11, 12]
-        assert list(out.columns) == ["roof_construction", *_OUTPUT_COLUMNS]
+        assert list(out.columns) == [*_AUDIT_COLUMNS, *_OUTPUT_COLUMNS]
         assert (out["roof_construction"] == "_single").all()
         # NaN absorptance handled (conservative dark roof) → finite output.
         assert np.isfinite(out["electricity_saved_kwh_yr"].to_numpy()).all()
@@ -451,6 +453,38 @@ class TestRunModel:
         )
         out = run_model(df, weather_df)
         assert list(out["roof_construction"]) == ["terracotta", "concrete", "metal", "slate"]
+
+    def test_cool_coating_follows_roof_type(self, weather_df):
+        # Each roof type is coated with its own cool absorptance, not one global value.
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.8, 0.8, 0.8, 0.8],
+                "roof_surface_area_m2": [100.0] * 4,
+                "roof_material": ["terracotta", "concrete_tile", "metal_dark", "slate"],
+            },
+        )
+        out = run_model(df, weather_df)
+        expected = [COOL_ROOF_ABSORPTANCE_BY_STACK[k] for k in ["terracotta", "concrete", "metal", "slate"]]
+        assert list(out["cool_absorptance_applied"]) == expected
+        stacks = [load_roof_layers(ROOF_LAYERS_TERRACOTTA_CSV), load_roof_layers(ROOF_LAYERS_TILE_CSV),
+                  load_roof_layers(), load_roof_layers(ROOF_LAYERS_SLATE_CSV)]
+        assert list(out["cool_emissivity_applied"]) == [st.emissivity_cool for st in stacks]
+
+    def test_cool_absorptance_override_applies_to_all(self, weather_df):
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.8, 0.8],
+                "roof_surface_area_m2": [100.0, 100.0],
+                "roof_material": ["terracotta", "metal_dark"],
+            },
+        )
+        out = run_model(df, weather_df, cool_absorptance=0.23)
+        assert (out["cool_absorptance_applied"] == 0.23).all()
+
+    def test_forced_single_stack_uses_generic_coating(self, weather_df, stack):
+        df = pd.DataFrame({"absorptance_before": [0.8], "roof_surface_area_m2": [100.0]})
+        out = run_model(df, weather_df, roof_stack=stack)
+        assert out["cool_absorptance_applied"].iloc[0] == COOL_ROOF_ABSORPTANCE
 
 
 # ── Insulation-upgrade scenario (opt-in) ─────────────────────────────────────
@@ -537,7 +571,7 @@ class TestRunModelInsulation:
             {"absorptance_before": [0.8], "roof_surface_area_m2": [120.0]},
         )
         out = run_model(df, weather_df, roof_stack=stack)
-        assert list(out.columns) == ["roof_construction", *_OUTPUT_COLUMNS]
+        assert list(out.columns) == [*_AUDIT_COLUMNS, *_OUTPUT_COLUMNS]
 
     def test_opt_in_adds_insulation_columns(self, weather_df, stack):
         df = pd.DataFrame(
@@ -549,7 +583,7 @@ class TestRunModelInsulation:
             insulation_thickness_upgrade_m=INSULATION_UPGRADE_THICKNESS_M,
         )
         assert list(out.columns) == [
-            "roof_construction", *_OUTPUT_COLUMNS, *_INSULATION_OUTPUT_COLUMNS,
+            *_AUDIT_COLUMNS, *_OUTPUT_COLUMNS, *_INSULATION_OUTPUT_COLUMNS,
         ]
         assert np.isfinite(out["insulation_net_electricity_saved_kwh_yr"].to_numpy()).all()
         # The cool-roof columns must be unaffected by the extra scenario.

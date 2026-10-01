@@ -4,6 +4,34 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-10-01 — Cool-roof coating matched to roof type (Stages 2 & 3)
+
+**Decision:** Replace the single global `COOL_ROOF_ABSORPTANCE = 0.20` with a
+per-roof-type coated absorptance, `COOL_ROOF_ABSORPTANCE_BY_STACK` in
+`config/settings.py` — metal 0.068, concrete tile 0.068, terracotta 0.14,
+slate 0.14 — taken from the `Absorptivity_cool` column of
+`Final_Heat_Ingress_Model.ipynb`'s Roof_layers table. The roof_material →
+stack map moved to settings (`ROOF_STACK_BY_MATERIAL`) so Stage 2's
+absorbed-solar proxy and Stage 3's march coat each building identically.
+Stage 2 gains `absorptance_after`; Stage 3 gains `cool_absorptance_applied`
+and `cool_emissivity_applied` audit columns.
+
+**Why:** team review (Angus) — the Stage 3 parquet's numbers must reflect the
+coating appropriate to each roof type. The port already carried per-material
+`Emissivity_cool` but not `Absorptivity_cool`, so every roof was coated to
+0.20 regardless of material, unlike the reference notebook.
+
+**Effect (Carlton sample, 40 buildings per material, 2007 weather):** net
+electricity saved per m² roof rose ~5–20% (concrete 0.33 → 0.40, metal
+0.44 → 0.48, slate 0.65 → 0.68, terracotta 0.54 → 0.58 kWh/m²/yr).
+
+**Open:** the metal value models a white coating. Colorbond Coolmax (SR 0.77,
+α ≈ 0.23) is the realistic new-build metal product — change the `"metal"`
+entry or pass `run_model(cool_absorptance=...)` to model it. `COOL_ROOF_ABSORPTANCE`
+(0.20) remains only as the fallback for a forced single stack.
+
+---
+
 ## 2026-09-19 — Stage 3 kernel: hoist suburb-uniform weather out of the per-building loop
 
 **Decision:** In `_march_kernel` (the numba-JIT transient march), every

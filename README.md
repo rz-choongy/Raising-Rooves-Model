@@ -414,7 +414,8 @@ Stage 3 appends these columns to the Stage 2 table:
 | Column | Description |
 | --- | --- |
 | `roof_heat_ingress_base_kwh_m2_yr` | Annual roof→interior heat per m² roof, at the current absorptance (signed) |
-| `roof_heat_ingress_cool_kwh_m2_yr` | Same, at `COOL_ROOF_ABSORPTANCE` (0.20) |
+| `roof_heat_ingress_cool_kwh_m2_yr` | Same, at the roof type's cool-coating absorptance (`COOL_ROOF_ABSORPTANCE_BY_STACK`) |
+| `cool_absorptance_applied` / `cool_emissivity_applied` | Audit — the coated absorptance and emissivity this building was marched at |
 | `cooling_season_heat_avoided_kwh_yr` | Interior heat the cool roof keeps out during hours with outdoor temp ≥ 18 °C, × roof surface area |
 | `heating_season_heat_added_kwh_yr` | Wanted winter solar gain the cool roof rejects (hours < 18 °C), × roof surface area |
 | `cooling_fraction_applied` / `hvac_cop` | Audit — `COOLING_FRACTION` and COP by building type |
@@ -472,7 +473,12 @@ stability-checked `dt` computed) separately; Stage 3 output carries a
 `roof_construction` audit column (`"metal"` / `"concrete"` / `"terracotta"` /
 `"slate"`) per building.
 
-The cool-roof saving is `march(α_before) − march(0.20)`, integrated per hour and
+The cool coating is matched to the roof type (`COOL_ROOF_ABSORPTANCE_BY_STACK`,
+from `Final_Heat_Ingress_Model.ipynb`'s `Absorptivity_cool`): metal and concrete
+tile α = 0.068, terracotta and slate α = 0.14. Unknown materials use the metal
+coating.
+
+The cool-roof saving is `march(α_before) − march(α_cool[roof type])`, integrated per hour and
 split by that hour's outdoor temperature against the 18 °C cooling/heating base.
 The first 48 h are discarded as thermal spin-up. Per-building kWh =
 per-m² result × `roof_surface_area_m2`.
@@ -674,10 +680,11 @@ Solar absorptance before treatment is estimated from `roof_colour` first, then
 | Light metal | 0.45 |
 | Unknown | 0.75 |
 
-Cool roof treatment target absorptance:
+Cool roof treatment target absorptance depends on the roof type, the same
+lookup Stage 3 uses (output column `absorptance_after`):
 
 ```text
-COOL_ROOF_ABSORPTANCE = 0.20
+COOL_ROOF_ABSORPTANCE_BY_STACK = {metal: 0.068, concrete: 0.068, terracotta: 0.14, slate: 0.14}
 ```
 
 Calculation:
@@ -685,7 +692,7 @@ Calculation:
 ```text
 roof_surface_area_m2 = area_m2 / cos(pitch_deg)
 energy_incident      = annual_ghi_kwh_m2 * area_m2
-energy_saved         = energy_incident * (absorptance_before - 0.20)
+energy_saved         = energy_incident * (absorptance_before - absorptance_after)
 co2_saved            = energy_saved * 0.79 kg/kWh
 ```
 
