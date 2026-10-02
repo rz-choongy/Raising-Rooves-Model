@@ -1246,3 +1246,101 @@ def run_model(
         result["roof_construction"].map(COOL_COATING_BY_STACK).fillna("generic_cool_coating"),
     )
     return result
+
+
+def hourly_scenario_flux(
+    df: pd.DataFrame,
+    weather_df: pd.DataFrame,
+    *,
+    id_col: str = "building_id",
+    absorptance_col: str = "absorptance_before",
+    area_col: str = "roof_surface_area_m2",
+    roof_material_col: str = "roof_material",
+    spin_up_hours: int = HEAT_INGRESS_SPINUP_HOURS,
+    cdd_base_temp_c: float = CDD_BASE_TEMP,
+) -> pd.DataFrame:
+    """
+    Hourly ceiling heat flux for every building under all three roof options.
+
+    The same marches ``run_model`` rolls up to annual columns, kept hourly so
+    the economics side can inspect them. One row per building per hour (long
+    format), with:
+
+    - ``flux_existing_wh_m2`` — the roof as it is now (own construction,
+      current absorptance, uncoated). ``annual_benefit``'s "base".
+    - ``flux_coated_wh_m2`` — the same roof with its roof-type cool coating
+      (``COOL_ROOF_ABSORPTANCE_BY_STACK``). ``annual_benefit``'s "cool".
+    - ``flux_coolmax_wh_m2`` — the roof replaced with Colorbond Coolmax steel
+      (``COOLMAX_ABSORPTANCE``/``COOLMAX_EMISSIVITY``), as ``--coolmax``.
+    - ``heat_*_kwh`` — each flux × ``roof_surface_area_m2`` / 1000, i.e. the
+      building's hourly ceiling heat in kWh (thermal, before COP).
+
+    Flux is per m² of roof: positive = heat into the room, negative = heat
+    out of it. ``hvac_mode`` is the outdoor-temperature split ``annual_benefit``
+    uses for the headline; ``spin_up`` marks the hours it discards. Summing
+    ``flux_existing_wh_m2 - flux_coated_wh_m2`` over non-spin-up rows of one
+    ``hvac_mode`` reproduces the annual thermal columns.
+    """
+    weather = build_hourly_weather(weather_df)
+    stacks = _load_default_stacks()
+    coolmax_stack = stacks["metal"]
+    group_key = df[roof_material_col].apply(stack_for_material)
+    absorptance_all = (
+        pd.to_numeric(df[absorptance_col], errors="coerce")
+        .fillna(1.0 - COOL_ROOF_ABSORPTANCE)  # unknown → conservative dark roof, as run_model
+        .to_numpy(float)
+    )
+    max_h_ext = float(np.max(weather.h_ext_w_m2k))
+
+    n_intervals = weather.n_hours - 1
+    time = weather.time_melbourne[:n_intervals]
+    temp = weather.outdoor_temp_c[:n_intervals]
+    hvac_mode = np.where(temp >= cdd_base_temp_c, "cooling", "heating")
+    spin_up = np.arange(n_intervals) < max(0, int(spin_up_hours))
+
+    frames = []
+    for key, stack in stacks.items():
+        mask = (group_key == key).to_numpy()
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        absorptance = absorptance_all[mask]
+        coated = cool_absorptance_for_stack(key)
+        flux = march_interior_flux(
+            weather, stack,
+            np.concatenate([absorptance, np.full(n, coated)]),
+            dt_s=resolve_timestep(stack, max_h_ext),
+            emissivity=np.concatenate(
+                [np.full(n, stack.emissivity), np.full(n, stack.emissivity_cool)]
+            ),
+        )
+        flux_coolmax = march_interior_flux(
+            weather, coolmax_stack, np.full(n, COOLMAX_ABSORPTANCE),
+            dt_s=resolve_timestep(coolmax_stack, max_h_ext),
+            emissivity=np.full(n, COOLMAX_EMISSIVITY),
+        )
+        sub = df.loc[mask]
+        area = pd.to_numeric(sub[area_col], errors="coerce").fillna(0.0).to_numpy(float)
+        for j in range(n):
+            existing, coated_f, coolmax_f = flux[:, j], flux[:, n + j], flux_coolmax[:, j]
+            frames.append(pd.DataFrame({
+                id_col: sub[id_col].iloc[j],
+                "time_melbourne": time,
+                "outdoor_temp_c": np.round(temp, 2),
+                "hvac_mode": hvac_mode,
+                "spin_up": spin_up,
+                "roof_construction": key,
+                "roof_surface_area_m2": area[j],
+                "absorptance_existing": absorptance[j],
+                "absorptance_coated": coated,
+                "absorptance_coolmax": COOLMAX_ABSORPTANCE,
+                "flux_existing_wh_m2": existing,
+                "flux_coated_wh_m2": coated_f,
+                "flux_coolmax_wh_m2": coolmax_f,
+                "heat_existing_kwh": existing * area[j] / 1000.0,
+                "heat_coated_kwh": coated_f * area[j] / 1000.0,
+                "heat_coolmax_kwh": coolmax_f * area[j] / 1000.0,
+            }))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)

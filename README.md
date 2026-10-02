@@ -584,6 +584,26 @@ python -m tools.compare_suburbs            # best available stage per suburb
 python -m tools.compare_suburbs --stage 2  # force Stage 2 data
 ```
 
+### Hourly Roof Flux Export
+
+Stage 3 writes annual totals only. This re-marches the same model for a few
+buildings and keeps every hour, with all three roof options side by side:
+`flux_existing_wh_m2` (roof as it is, uncoated), `flux_coated_wh_m2` (same
+roof + its roof-type cool coating) and `flux_coolmax_wh_m2` (re-roofed in
+Colorbond Coolmax). Flux is Wh per m² of roof per hour; positive = heat into
+the room. Each row also carries `roof_surface_area_m2` and `heat_*_kwh`
+(flux × area), plus `hvac_mode` (outdoor ≥ 18 °C split) and `spin_up` (hours
+the annual roll-up discards). Summed over non-spin-up hours it reproduces the
+Stage 3 annual columns.
+
+```bash
+python -m tools.export_hourly_flux --suburb Carlton --building-id 1456833098
+python -m tools.export_hourly_flux --suburb Carlton --sample 5 --min-area 100 --max-area 250
+```
+
+Writes `data/output/hourly_flux_{suburb}.csv` (`--out x.parquet` also works).
+Capped at 50 buildings (`--max-buildings`) since each is ~8,760 rows.
+
 ### Seasonal Analysis
 
 Monthly cool roof benefit vs heating penalty with R_roof sensitivity sweeps.
