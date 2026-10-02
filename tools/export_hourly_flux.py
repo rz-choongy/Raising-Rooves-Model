@@ -27,6 +27,7 @@ Output:
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -63,6 +64,8 @@ def select_buildings(
             raise ValueError(f"building_id not in Stage 2 output: {sorted(missing)}")
         return picked
 
+    if sample is None or sample < 1:
+        raise ValueError("--sample must be at least 1.")
     area = pd.to_numeric(df["roof_surface_area_m2"], errors="coerce")
     keep = area > 0
     if min_area_m2 is not None:
@@ -100,7 +103,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.debug:
-        setup_logging("export_hourly_flux", level="DEBUG")
+        for name in ("export_hourly_flux", "heat_ingress_model", "stage3_pipeline"):
+            logging.getLogger(name).setLevel("DEBUG")
 
     suburb = get_suburb(args.suburb)
     df = load_stage_input(2, suburb.key)

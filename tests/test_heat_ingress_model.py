@@ -714,7 +714,10 @@ class TestHourlyScenarioFlux:
                 "roof_material": ["metal_dark", "terracotta"],
             }
         )
-        hourly = hourly_scenario_flux(df, weather_df)
+        # The 96 h fixture never reaches 18 °C after spin-up, so lower the
+        # cooling threshold on both sides to exercise the cooling-hour split.
+        cdd = 12.0
+        hourly = hourly_scenario_flux(df, weather_df, cdd_base_temp_c=cdd)
         annual = run_model(df, weather_df, coolmax=True)
 
         assert len(hourly) == 2 * (len(weather_df) - 1)
@@ -729,11 +732,20 @@ class TestHourlyScenarioFlux:
                 rows["flux_coated_wh_m2"].sum() / 1000.0,
                 annual.loc[i, "roof_heat_ingress_cool_kwh_m2_yr"], atol=0.01,
             )
+            assert ((rows["outdoor_temp_c"] >= cdd) == (rows["hvac_mode"] == "cooling")).all()
             cooling = rows[rows["hvac_mode"] == "cooling"]
+            assert len(cooling) > 0
+            full = hourly[hourly["building_id"] == bid]  # annual_benefit drops spin-up itself
+            expected = annual_benefit(
+                full[["flux_existing_wh_m2"]].to_numpy(), full[["flux_coated_wh_m2"]].to_numpy(),
+                build_hourly_weather(weather_df), [df.loc[i, "roof_surface_area_m2"]],
+                cdd_base_temp_c=cdd,
+            )
             np.testing.assert_allclose(
                 max(0.0, (cooling["heat_existing_kwh"] - cooling["heat_coated_kwh"]).sum()),
-                annual.loc[i, "cooling_season_heat_avoided_kwh_yr"], atol=0.1,
+                expected.loc[0, "cooling_season_heat_avoided_kwh_yr"], atol=0.1,
             )
+            assert expected.loc[0, "cooling_season_heat_avoided_kwh_yr"] > 0
             np.testing.assert_allclose(
                 rows["heat_existing_kwh"], rows["flux_existing_wh_m2"] * rows["roof_surface_area_m2"] / 1000.0,
             )
