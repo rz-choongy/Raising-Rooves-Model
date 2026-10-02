@@ -393,6 +393,7 @@ python -m stage3_thermal.run_stage3 --suburb "Carlton"
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --year 2007 --debug
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --weather-csv path/to/hourly.csv
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --insulation-r-upgrade 4.1  # opt-in insulation-vs-coating comparison
+python -m stage3_thermal.run_stage3 --suburb "Carlton" --coolmax  # opt-in Colorbond Coolmax re-roof scenario
 ```
 
 Prerequisites:
@@ -415,7 +416,12 @@ Stage 3 appends these columns to the Stage 2 table:
 | --- | --- |
 | `roof_heat_ingress_base_kwh_m2_yr` | Annual roof→interior heat per m² roof, at the current absorptance (signed) |
 | `roof_heat_ingress_cool_kwh_m2_yr` | Same, at the roof type's cool-coating absorptance (`COOL_ROOF_ABSORPTANCE_BY_STACK`) |
+| `roof_type` | Pricing roof type: `concrete` / `metal_light` / `metal_dark` / `slate` / `terracotta`. Metal-construction roofs without an explicit light/dark label are split at absorptance 0.55 |
+| `coating_type` | Cool coating applied: `metal_roof_coating` / `concrete_tile_coating` / `terracotta_slate_coating` |
 | `cool_absorptance_applied` / `cool_emissivity_applied` | Audit — the coated absorptance and emissivity this building was marched at |
+| `roof_flux_mode_mismatch_hours` | Hours where the current and cool roofs' heat flow point opposite ways (one heating the room, one cooling it) — Maggie's notebook "discrepancy" flag |
+| `electricity_saved_kwh_yr_fluxsign` / `heating_penalty_electricity_kwh_yr_fluxsign` / `net_electricity_saved_kwh_yr_fluxsign` | Sensitivity: the same saving counted the `Final_Heat_Ingress_Model.ipynb` way — mode from the sign of the roof heat flow, mismatch hours dropped. Roof-only view, so a lower bound; the headline columns use the outdoor-temperature split |
+| `cooling_electricity_saved_kwh_yr_coolmax` / `heating_penalty_electricity_kwh_yr_coolmax` / `net_electricity_saved_kwh_yr_coolmax` | Only with `--coolmax`: electricity effect of re-roofing in Colorbond Coolmax (SR 0.77, α 0.23, ε 0.85) as a complete replacement of the existing roof (existing tile/steel/slate at its current colour − new Coolmax steel deck) |
 | `cooling_season_heat_avoided_kwh_yr` | Interior heat the cool roof keeps out during hours with outdoor temp ≥ 18 °C, × roof surface area |
 | `heating_season_heat_added_kwh_yr` | Wanted winter solar gain the cool roof rejects (hours < 18 °C), × roof surface area |
 | `cooling_fraction_applied` / `hvac_cop` | Audit — `COOLING_FRACTION` and COP by building type |
@@ -491,6 +497,14 @@ per-m² result × `roof_surface_area_m2`.
 | HVAC COP | 3.0 residential, 4.0 commercial | GEMS 2019 / AIRAH DA19 |
 | Sky temperature | Bliss (1961) dew-point + time-of-day correlation | Replaces the earlier fixed `T_out − 10 K` assumption |
 | Roof tilt (airspace's outer-facing convection only) | 20° | `HEAT_INGRESS_ROOF_TILT_DEG` — single global value, like the reference notebook; not yet per-building `pitch_deg` |
+
+**Colorbond Coolmax re-roof scenario (opt-in):** `--coolmax` answers "if the
+owner is re-roofing anyway, how much does a Coolmax roof save?". It runs on
+every building as a complete replacement: the existing roof (its own
+tile/steel/slate construction at its current absorptance) vs a new Colorbond
+Coolmax steel-deck roof (`COOLMAX_*` in `config/settings.py`). Adds the three `*_coolmax`
+columns. No dollar costing is done in the pipeline — pricing per `coating_type`
+/ `roof_type` × `roof_surface_area_m2` is left to the economics model.
 
 **Insulation-upgrade scenario (opt-in):** `--insulation-r-upgrade R_M2K_W`
 (optionally paired with `--insulation-thickness-upgrade THICKNESS_M`) marches

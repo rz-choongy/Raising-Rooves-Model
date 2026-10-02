@@ -86,6 +86,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--coolmax",
+        action="store_true",
+        help=(
+            "Opt-in re-roof scenario: compare every building's existing roof "
+            "(tile/steel/slate, current colour) against a complete replacement "
+            "in Colorbond Coolmax steel (SR 0.77). Adds *_coolmax columns."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug-level logging",
@@ -118,6 +127,7 @@ def main() -> None:
             year=args.year,
             insulation_r_upgrade_m2k_w=args.insulation_r_upgrade,
             insulation_thickness_upgrade_m=args.insulation_thickness_upgrade,
+            coolmax=args.coolmax,
         )
         if df.empty:
             logger.warning("No results produced. Check logs for details.")

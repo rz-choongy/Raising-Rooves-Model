@@ -42,6 +42,7 @@ from config.settings import (
 from stage3_thermal import heat_ingress_model as him
 from stage3_thermal.heat_ingress_model import (
     _AUDIT_COLUMNS,
+    _COOLMAX_OUTPUT_COLUMNS,
     _DEWPOINT_A,
     _DEWPOINT_B,
     _INSULATION_OUTPUT_COLUMNS,
@@ -61,6 +62,7 @@ from stage3_thermal.heat_ingress_model import (
     march_interior_flux,
     max_stable_timestep,
     resolve_timestep,
+    roof_type_for,
     run_model,
     stack_for_material,
 )
@@ -601,3 +603,99 @@ class TestRunModelInsulation:
             insulation_r_upgrade_m2k_w=INSULATION_UPGRADE_R_M2K_W,
         )
         assert out["insulation_net_electricity_saved_kwh_yr"].iloc[0] > 0.0
+
+
+# ── Pricing columns + Colorbond Coolmax re-roof scenario ─────────────────────
+class TestRoofTypeAndCoolmax:
+    @pytest.mark.parametrize(
+        "material, absorptance, expected",
+        [
+            ("concrete_tile", 0.7, "concrete"),
+            ("roof_tiles", 0.7, "concrete"),
+            ("terracotta", 0.7, "terracotta"),
+            ("slate", 0.9, "slate"),
+            ("metal_light", 0.9, "metal_light"),  # explicit label wins
+            ("metal_dark", 0.3, "metal_dark"),
+            ("other", 0.8, "metal_dark"),          # split on absorptance
+            (None, 0.4, "metal_light"),
+        ],
+    )
+    def test_roof_type_for(self, material, absorptance, expected):
+        assert roof_type_for(material, absorptance) == expected
+
+    def test_roof_and_coating_type_columns(self, weather_df):
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.8, 0.8, 0.4],
+                "roof_surface_area_m2": [100.0] * 3,
+                "roof_material": ["terracotta", "concrete_tile", "other"],
+            }
+        )
+        out = run_model(df, weather_df)
+        assert list(out["roof_type"]) == ["terracotta", "concrete", "metal_light"]
+        assert list(out["coating_type"]) == [
+            "terracotta_slate_coating", "concrete_tile_coating", "metal_roof_coating",
+        ]
+        assert not any(c in out.columns for c in _COOLMAX_OUTPUT_COLUMNS)  # opt-in only
+
+    def test_coolmax_compares_existing_roof_to_coolmax_steel(self, weather_df):
+        # Complete replacement: existing roof (own construction + current
+        # absorptance) minus a new Coolmax steel roof. Checked independently
+        # for a metal roof (in-group march path) and a terracotta roof
+        # (separate steel march path).
+        from config.settings import COOLMAX_ABSORPTANCE, COOLMAX_EMISSIVITY
+
+        df = pd.DataFrame(
+            {
+                "absorptance_before": [0.8, 0.8],
+                "roof_surface_area_m2": [120.0, 120.0],
+                "roof_material": ["metal_dark", "terracotta"],
+            }
+        )
+        out = run_model(df, weather_df, coolmax=True)
+        assert list(out.columns[-3:]) == list(_COOLMAX_OUTPUT_COLUMNS)
+
+        weather = build_hourly_weather(weather_df)
+        steel = load_roof_layers()
+        h_max = float(weather.h_ext_w_m2k.max())
+        coolmax_flux = march_interior_flux(
+            weather, steel, np.array([COOLMAX_ABSORPTANCE]),
+            dt_s=resolve_timestep(steel, h_max), emissivity=COOLMAX_EMISSIVITY,
+        )
+        for row, stack in [(0, steel), (1, load_roof_layers(ROOF_LAYERS_TERRACOTTA_CSV))]:
+            existing = march_interior_flux(
+                weather, stack, np.array([0.8]), dt_s=resolve_timestep(stack, h_max),
+            )
+            expected = annual_benefit(existing, coolmax_flux, weather, [120.0])
+            np.testing.assert_allclose(
+                out.loc[row, list(_COOLMAX_OUTPUT_COLUMNS)].to_numpy(float),
+                expected[["electricity_saved_kwh_yr", "heating_penalty_electricity_kwh_yr",
+                          "net_electricity_saved_kwh_yr"]].to_numpy(float)[0],
+            )
+        # The coating columns are unchanged by adding the scenario.
+        base = run_model(df, weather_df)
+        pd.testing.assert_frame_equal(out[base.columns], base)
+
+
+# ── Flux-sign accounting (Maggie's notebook method) ──────────────────────────
+class TestFluxSignAccounting:
+    def test_matches_notebook_hourly_comparison(self, weather):
+        # Synthetic hourly fluxes: both-in (cooling), both-out (heating), and
+        # one mismatch hour that the notebook leaves as NaN.
+        n_hours = weather.n_hours - 1
+        base = np.zeros((n_hours, 1)); cool = np.zeros((n_hours, 1))
+        base[60], cool[60] = 50.0, 20.0     # both into the room: saved 30 Wh
+        base[61], cool[61] = -10.0, -25.0   # both out: cool loses 15 Wh more
+        base[62], cool[62] = 40.0, -5.0     # mismatch: dropped
+        out = annual_benefit(base, cool, weather, [1000.0], ["house"], cooling_fraction=1.0,
+                             heating_fraction=1.0)
+        cop = HVAC_COP_RESIDENTIAL
+        assert out.loc[0, "roof_flux_mode_mismatch_hours"] == 1
+        # notebook: saved_Wh = |normal| - |cool| on same-mode hours
+        assert out.loc[0, "electricity_saved_kwh_yr_fluxsign"] == round(30.0 / cop, 1)  # 30 Wh/m2 x 1000 m2
+        assert out.loc[0, "heating_penalty_electricity_kwh_yr_fluxsign"] == round(15.0 / cop, 1)
+
+    def test_fluxsign_is_a_lower_bound_on_cooling(self, weather, stack):
+        flux = march_interior_flux(weather, stack, np.array([0.9, COOL_ROOF_ABSORPTANCE]), dt_s=40.0)
+        out = annual_benefit(flux[:, :1], flux[:, 1:], weather, [100.0])
+        assert out.loc[0, "electricity_saved_kwh_yr_fluxsign"] <= out.loc[0, "electricity_saved_kwh_yr"]

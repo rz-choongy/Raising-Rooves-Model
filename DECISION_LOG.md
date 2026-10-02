@@ -4,6 +4,71 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-10-01 — Pricing columns and Colorbond Coolmax re-roof scenario
+
+**Decision:** Stage 3 now writes `roof_type` (concrete / metal_light /
+metal_dark / slate / terracotta) and `coating_type` (metal_roof_coating /
+concrete_tile_coating / terracotta_slate_coating) on every row, so the
+economics model can price the right coating × `roof_surface_area_m2`. An
+opt-in `--coolmax` flag adds a re-roof scenario run on every building as a
+complete replacement: its existing roof (own tile/steel/slate construction at
+its current absorptance) vs a new Colorbond Coolmax steel-deck roof (SR 0.77 →
+α 0.23, ε 0.85), giving
+`cooling_electricity_saved_kwh_yr_coolmax`,
+`heating_penalty_electricity_kwh_yr_coolmax` and
+`net_electricity_saved_kwh_yr_coolmax`.
+
+**Why:** Angus (economics) needs to price the coating per building and test
+whether Coolmax is worth its premium ($28.45 vs $17.83 per lineal metre, 900 mm
+cover, supplier buy price) when an owner is re-roofing anyway.
+
+**Confirmed in team chat (2026-10-01):** Angus — Coolmax is a complete
+replacement run on every building (existing tile/steel/slate minus new
+Coolmax); the current annual parquet format is fine; everything else OK.
+Seamus — `Final_Heat_Ingress_Model.ipynb` (ported 2026-09-19) is Maggie's
+finalised model ("finalised my code yesterday evening", 2026-09-18).
+
+**Still open (Maggie):** she describes "three different paint types"; her
+committed notebook has only two distinct coated (α, ε) pairs — 0.068/0.875
+(concrete, steel) and 0.14/0.880 (terracotta, slate) — so the three
+`coating_type` names are a best guess — no paint names appear anywhere in
+the repo, its history, the notebooks' saved outputs or the team Drive.
+Coolmax emissivity 0.85 kept (Ryan, 2026-10-01); it matches the thermal
+emittance in `Input Tables/material_properties_table4.csv` (Cool Roof Cost
+Benefit Analysis Vol 4). The 0.55 metal light/dark split only affects `roof_type` for
+unlabelled roofs and sits between the classifier's own bands (metal_light
+needs V > 0.75 → α < 0.39; metal_dark V < 0.5 → α > 0.58).
+
+**Cooling/heating hour split — both methods reported, outdoor-temp split is
+the headline.** Maggie's notebook decides each hour's mode from the sign of
+the roof heat flux and leaves hours where the normal and cool roofs disagree
+as NaN; the pipeline splits on outdoor temp ≥ 18 °C and counts every hour.
+Stage 3 now outputs both: headline columns (outdoor split) plus
+`*_fluxsign` columns and `roof_flux_mode_mismatch_hours`.
+
+Why the outdoor split stays the headline: the march already holds the room
+at a setpoint picked by outdoor temperature (18 °C heating / 20 °C cooling —
+the notebook does the same), i.e. the house's HVAC mode is set by the
+weather, not by the roof. The roof is one load among walls, windows and
+internal gains, so in a cooling hour any reduction in roof heat flow cuts
+the house's cooling load even when the roof alone would be "losing" heat.
+The flux-sign rule treats the roof as the room's only load and discards the
+mismatch hours (20–28 % of the year on Carlton 2007), so it is a lower
+bound. `COOLING_FRACTION`/`HEATING_FRACTION` already discount hours the HVAC
+isn't running.
+
+Carlton sample (30 buildings per material, 2007), net electricity kWh/m²
+roof/yr, outdoor split vs flux-sign: concrete 0.40 vs −0.16, metal_dark
+0.58 vs 0.17, metal_light 0.20 vs −0.28, slate 0.68 vs 0.56, terracotta
+0.58 vs 0.36. The method choice can flip the sign for light roofs, so the
+FYP report should show both.
+
+**Efficiency:** the existing-roof flux is the group's own "current" march
+(reused, not re-marched); metal-roofed groups march Coolmax in the same call,
+other groups need one extra steel march each.
+
+---
+
 ## 2026-10-01 — Cool-roof coating matched to roof type (Stages 2 & 3)
 
 **Decision:** Replace the single global `COOL_ROOF_ABSORPTANCE = 0.20` with a

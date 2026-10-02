@@ -77,7 +77,10 @@ except Exception:  # noqa: BLE001 - numba is optional; fall back to vectorised n
 from config.settings import (
     CDD_BASE_TEMP,
     COOL_ROOF_ABSORPTANCE,
+    COOL_COATING_BY_STACK,
     COOL_ROOF_ABSORPTANCE_BY_STACK,
+    COOLMAX_ABSORPTANCE,
+    COOLMAX_EMISSIVITY,
     COOLING_FRACTION,
     DEFAULT_ROOF_STACK,
     GRID_EMISSIONS_FACTOR_KG_KWH,
@@ -97,6 +100,7 @@ from config.settings import (
     INSULATION_UPGRADE_THICKNESS_M,
     ROOF_LAYERS_CSV,
     ROOF_STACK_BY_MATERIAL,
+    ROOF_TYPE_METAL_DARK_MIN_ABSORPTANCE,
     ROOF_LAYERS_SLATE_CSV,
     ROOF_LAYERS_TERRACOTTA_CSV,
     ROOF_LAYERS_TILE_CSV,
@@ -777,6 +781,10 @@ _OUTPUT_COLUMNS = (
     "net_electricity_saved_kwh_yr",
     "co2_electricity_saved_kg_yr",
     "net_co2_electricity_saved_kg_yr",
+    "roof_flux_mode_mismatch_hours",
+    "electricity_saved_kwh_yr_fluxsign",
+    "heating_penalty_electricity_kwh_yr_fluxsign",
+    "net_electricity_saved_kwh_yr_fluxsign",
 )
 
 
@@ -841,6 +849,19 @@ def annual_benefit(
     heating_penalty_elec = heating_kwh * heating_fraction / cop
     net_electricity = electricity_saved - heating_penalty_elec
 
+    # Flux-sign accounting, as in Final_Heat_Ingress_Model.ipynb's hourly
+    # comparison: an hour is "cooling" when both roofs push heat into the room,
+    # "heating" when both pull heat out, and dropped (NaN in the notebook) when
+    # they disagree. Treats the roof as the room's only load, so it is a lower
+    # bound next to the whole-house outdoor-temperature split above.
+    both_in = (base > 0) & (cool > 0)
+    both_out = (base < 0) & (cool < 0)
+    mismatch_hours = (np.sign(base) != np.sign(cool)).sum(axis=0)
+    fs_cooling_kwh = np.maximum(0.0, np.where(both_in, delta_wh_m2, 0.0).sum(axis=0) / 1000.0) * area
+    fs_heating_kwh = np.maximum(0.0, np.where(both_out, delta_wh_m2, 0.0).sum(axis=0) / 1000.0) * area
+    fs_saved = fs_cooling_kwh * cooling_fraction / cop
+    fs_penalty = fs_heating_kwh * heating_fraction / cop
+
     base_kwh_m2 = flux_base[sl].sum(axis=0) / 1000.0
     cool_kwh_m2 = flux_cool[sl].sum(axis=0) / 1000.0
 
@@ -857,6 +878,10 @@ def annual_benefit(
             "net_electricity_saved_kwh_yr": np.round(net_electricity, 1),
             "co2_electricity_saved_kg_yr": np.round(electricity_saved * co2_factor_kg_kwh, 1),
             "net_co2_electricity_saved_kg_yr": np.round(net_electricity * co2_factor_kg_kwh, 1),
+            "roof_flux_mode_mismatch_hours": mismatch_hours,
+            "electricity_saved_kwh_yr_fluxsign": np.round(fs_saved, 1),
+            "heating_penalty_electricity_kwh_yr_fluxsign": np.round(fs_penalty, 1),
+            "net_electricity_saved_kwh_yr_fluxsign": np.round(fs_saved - fs_penalty, 1),
         }
     )
 
@@ -962,9 +987,57 @@ def annual_benefit_insulation(
     )
 
 
-# Per-building audit columns run_model prepends: which construction was marched
-# and the cool coating (absorptance, emissivity) it was marched at.
-_AUDIT_COLUMNS = ("roof_construction", "cool_absorptance_applied", "cool_emissivity_applied")
+_COOLMAX_OUTPUT_COLUMNS = (
+    "cooling_electricity_saved_kwh_yr_coolmax",
+    "heating_penalty_electricity_kwh_yr_coolmax",
+    "net_electricity_saved_kwh_yr_coolmax",
+)
+
+
+def _coolmax_columns(
+    flux_existing: np.ndarray,
+    flux_coolmax: np.ndarray,
+    weather: HourlyWeather,
+    area: np.ndarray,
+    building_type: list,
+    index: pd.Index,
+) -> pd.DataFrame:
+    """Existing-roof-vs-Coolmax-replacement electricity columns, via ``annual_benefit``."""
+    out = annual_benefit(flux_existing, flux_coolmax, weather, area, building_type)
+    return pd.DataFrame(
+        {
+            "cooling_electricity_saved_kwh_yr_coolmax": out["electricity_saved_kwh_yr"].to_numpy(),
+            "heating_penalty_electricity_kwh_yr_coolmax": out["heating_penalty_electricity_kwh_yr"].to_numpy(),
+            "net_electricity_saved_kwh_yr_coolmax": out["net_electricity_saved_kwh_yr"].to_numpy(),
+        },
+        index=index,
+    )
+
+
+def roof_type_for(roof_material, absorptance_before: float) -> str:
+    """
+    Pricing roof type: ``concrete``/``terracotta``/``slate``/``metal_light``/``metal_dark``.
+
+    Tile/slate come straight from the stack. Metal keeps an explicit
+    ``metal_light``/``metal_dark`` label; any other metal-stack building
+    (bare ``metal``, ``other``, unknown) is split on its current absorptance
+    at ``ROOF_TYPE_METAL_DARK_MIN_ABSORPTANCE``.
+    """
+    label = _normalize_label(roof_material)
+    stack = stack_for_material(label)
+    if stack != "metal":
+        return stack
+    if label in ("metal_light", "metal_dark"):
+        return label
+    return "metal_dark" if absorptance_before >= ROOF_TYPE_METAL_DARK_MIN_ABSORPTANCE else "metal_light"
+
+
+# Per-building audit columns run_model prepends: which construction was marched,
+# the pricing roof type, and the cool coating (product, absorptance, emissivity).
+_AUDIT_COLUMNS = (
+    "roof_construction", "roof_type", "coating_type",
+    "cool_absorptance_applied", "cool_emissivity_applied",
+)
 
 
 def _load_default_stacks() -> dict[str, RoofStack]:
@@ -989,6 +1062,7 @@ def run_model(
     cool_absorptance: float | None = None,
     insulation_r_upgrade_m2k_w: float | None = None,
     insulation_thickness_upgrade_m: float | None = None,
+    coolmax: bool = False,
 ) -> pd.DataFrame:
     """
     End-to-end Stage 3 engine: per-building transient benefit for one suburb.
@@ -1027,6 +1101,15 @@ def run_model(
             depth) -- see ``config.settings.INSULATION_UPGRADE_THICKNESS_M``
             to instead reproduce the reference notebook's own thicker-batt
             scenario.
+        coolmax: Opt-in re-roof scenario -- a complete replacement of every
+            building's existing roof (its own construction and current
+            absorptance: tile, steel or slate) with a Colorbond Coolmax
+            steel-deck roof (``COOLMAX_ABSORPTANCE``/``COOLMAX_EMISSIVITY``).
+            Adds :data:`_COOLMAX_OUTPUT_COLUMNS` (existing − Coolmax).
+
+    Every result carries ``roof_type`` (concrete / metal_light / metal_dark /
+    slate / terracotta) and ``coating_type`` (which cool coating was applied,
+    ``COOL_COATING_BY_STACK``) so the coating can be priced per building.
 
     Returns a DataFrame indexed like ``df`` with :data:`_OUTPUT_COLUMNS`
     (plus :data:`_INSULATION_OUTPUT_COLUMNS` when
@@ -1054,13 +1137,24 @@ def run_model(
         df[building_type_col].tolist() if building_type_col in df.columns else [None] * len(df)
     )
 
+    max_h_ext = float(np.max(weather.h_ext_w_m2k))
+    # Coolmax re-roof scenario: a complete replacement, so every building's
+    # existing roof (its own construction and current absorptance — tile,
+    # steel or slate) is compared against a new Coolmax steel-deck roof. The
+    # existing-roof flux is the group's "current" march; metal-roofed groups
+    # march Coolmax in the same call, other groups need one extra steel march.
+    coolmax_stack = (
+        (stacks.get("metal") or load_roof_layers(ROOF_LAYERS_CSV)) if coolmax else None
+    )
+    coolmax_results = []
+
     results = []
     for key, stack in stacks.items():
         mask = (group_key == key).to_numpy()
         n = int(mask.sum())
         if n == 0:
             continue
-        dt = resolve_timestep(stack, float(np.max(weather.h_ext_w_m2k)))
+        dt = resolve_timestep(stack, max_h_ext)
         absorptance = absorptance_before_all[mask]
         area = area_all[mask]
         building_type = [building_type_all[i] for i in np.where(mask)[0]]
@@ -1069,59 +1163,86 @@ def run_model(
             float(cool_absorptance) if cool_absorptance is not None
             else cool_absorptance_for_stack(key)
         )
-        test_insulation = insulation_r_upgrade_m2k_w is not None
-        n_scenarios = 3 if test_insulation else 2
-
-        # One march for all scenarios: columns [0:n] = current, [n:2n] = cool
-        # roof, and (opt-in) [2n:3n] = current roof + upgraded insulation.
         current_r2 = float(stack.r_value_m2k_w[2])
         current_thickness2 = float(stack.thickness_m[2])
-        stacked_absorptance = np.concatenate(
-            [absorptance, np.full(n, group_cool_absorptance)]
-            + ([absorptance] if test_insulation else [])
+        upgrade_thickness = (
+            float(insulation_thickness_upgrade_m)
+            if insulation_thickness_upgrade_m is not None else current_thickness2
         )
-        stacked_emissivity = np.concatenate(
-            [np.full(n, stack.emissivity), np.full(n, stack.emissivity_cool)]
-            + ([np.full(n, stack.emissivity)] if test_insulation else [])
-        )
-        stacked_insulation_r = np.concatenate(
-            [np.full(n, current_r2), np.full(n, current_r2)]
-            + ([np.full(n, float(insulation_r_upgrade_m2k_w))] if test_insulation else [])
-        )
-        stacked_insulation_thickness = np.concatenate(
-            [np.full(n, current_thickness2), np.full(n, current_thickness2)]
-            + (
-                [np.full(n, float(insulation_thickness_upgrade_m
-                                   if insulation_thickness_upgrade_m is not None
-                                   else current_thickness2))]
-                if test_insulation else []
+
+        # One march for all scenarios, n columns each:
+        # (absorptance, emissivity, insulation R, insulation thickness).
+        scenarios = {
+            "current": (absorptance, stack.emissivity, current_r2, current_thickness2),
+            "cool": (group_cool_absorptance, stack.emissivity_cool, current_r2, current_thickness2),
+        }
+        if insulation_r_upgrade_m2k_w is not None:
+            scenarios["insulation"] = (
+                absorptance, stack.emissivity, float(insulation_r_upgrade_m2k_w), upgrade_thickness
             )
-        )
+        reroof_in_group = coolmax and stack is coolmax_stack
+        if reroof_in_group:
+            scenarios["coolmax"] = (
+                COOLMAX_ABSORPTANCE, COOLMAX_EMISSIVITY, current_r2, current_thickness2
+            )
+
+        def _stack_col(i: int) -> np.ndarray:
+            return np.concatenate(
+                [np.broadcast_to(np.asarray(v[i], dtype=float), (n,)) for v in scenarios.values()]
+            )
+
         logger.info(
-            "Marching %d '%s'-roof buildings × %d scenario%s over %d h at dt=%.1f s "
+            "Marching %d '%s'-roof buildings × %d scenarios (%s) over %d h at dt=%.1f s "
             "(%d substeps/h)...",
-            n, key, n_scenarios, "" if n_scenarios == 1 else "s",
+            n, key, len(scenarios), ", ".join(scenarios),
             weather.n_hours, dt, int(np.ceil(3600.0 / dt)),
         )
         flux = march_interior_flux(
-            weather, stack, stacked_absorptance, dt_s=dt,
-            emissivity=stacked_emissivity,
-            insulation_r_m2k_w=stacked_insulation_r,
-            insulation_thickness_m=stacked_insulation_thickness,
+            weather, stack, _stack_col(0), dt_s=dt,
+            emissivity=_stack_col(1),
+            insulation_r_m2k_w=_stack_col(2),
+            insulation_thickness_m=_stack_col(3),
         )
-        group_result = annual_benefit(flux[:, :n], flux[:, n:2 * n], weather, area, building_type)
-        if test_insulation:
+        cols = {name: flux[:, i * n:(i + 1) * n] for i, name in enumerate(scenarios)}
+        group_result = annual_benefit(cols["current"], cols["cool"], weather, area, building_type)
+        if "insulation" in cols:
             insulation_result = annual_benefit_insulation(
-                flux[:, :n], flux[:, 2 * n:3 * n], weather, area, building_type
+                cols["current"], cols["insulation"], weather, area, building_type
             )
             insulation_result.index = group_result.index
             group_result = pd.concat([group_result, insulation_result], axis=1)
-        for i, (col, val) in enumerate(
-            zip(_AUDIT_COLUMNS, (key, group_cool_absorptance, stack.emissivity_cool))
-        ):
-            group_result.insert(i, col, val)
+        group_result.insert(0, "roof_construction", key)
+        group_result.insert(1, "cool_absorptance_applied", group_cool_absorptance)
+        group_result.insert(2, "cool_emissivity_applied", stack.emissivity_cool)
         group_result.index = df.index[mask]
         results.append(group_result)
+        if coolmax:
+            if reroof_in_group:
+                flux_coolmax = cols["coolmax"]
+            else:
+                logger.info(
+                    "Marching %d '%s'-roof buildings re-roofed in Coolmax steel...", n, key,
+                )
+                flux_coolmax = march_interior_flux(
+                    weather, coolmax_stack, np.full(n, COOLMAX_ABSORPTANCE),
+                    dt_s=resolve_timestep(coolmax_stack, max_h_ext),
+                    emissivity=np.full(n, COOLMAX_EMISSIVITY),
+                )
+            coolmax_results.append(
+                _coolmax_columns(cols["current"], flux_coolmax, weather, area,
+                                 building_type, df.index[mask])
+            )
 
     result = pd.concat(results).loc[df.index]
+    if coolmax:
+        result = pd.concat([result, pd.concat(coolmax_results).loc[df.index]], axis=1)
+
+    material = df[roof_material_col] if roof_material_col in df.columns else [None] * len(df)
+    result.insert(1, "roof_type", [
+        roof_type_for(m, a) for m, a in zip(material, absorptance_before_all)
+    ])
+    result.insert(
+        2, "coating_type",
+        result["roof_construction"].map(COOL_COATING_BY_STACK).fillna("generic_cool_coating"),
+    )
     return result

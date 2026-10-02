@@ -175,6 +175,32 @@ COOL_ROOF_ABSORPTANCE_BY_STACK: dict[str, float] = {
     "slate": 0.14,
 }
 
+# Which cool coating product each roof stack gets — Stage 3's `coating_type`
+# output column, so the economics can price the right product per building.
+# Three coatings: one for metal, one for concrete tile, one shared by
+# terracotta and slate (the notebook gives those two identical coated α/ε).
+COOL_COATING_BY_STACK: dict[str, str] = {
+    "metal": "metal_roof_coating",
+    "concrete": "concrete_tile_coating",
+    "terracotta": "terracotta_slate_coating",
+    "slate": "terracotta_slate_coating",
+}
+
+# Stage 3 `roof_type` splits metal-stack roofs without an explicit
+# metal_light/metal_dark label on current absorptance. 0.55 is the midpoint
+# of the notebook's Steel_light (0.30) and Steel_dark (0.80) absorptivities.
+ROOF_TYPE_METAL_DARK_MIN_ABSORPTANCE = 0.55
+
+# Colorbond Coolmax re-roof scenario (run_stage3 --coolmax). Supplier-quoted
+# solar reflectance 0.77 -> absorptance 0.23. Thermal emittance 0.85 matches
+# Input Tables/material_properties_table4.csv (Cool Roof Cost Benefit Analysis
+# Vol 4, cool and control roofs); kept per team decision 2026-10-01. Complete replacement: the
+# baseline is each building's existing roof (own construction + current
+# absorptance), the scenario a new Coolmax steel-deck roof.
+COOLMAX_SOLAR_REFLECTANCE = 0.77
+COOLMAX_ABSORPTANCE = round(1.0 - COOLMAX_SOLAR_REFLECTANCE, 3)
+COOLMAX_EMISSIVITY = 0.85
+
 # Victorian grid emissions intensity (kg CO2-e per kWh), AEMO 2023
 GRID_EMISSIONS_FACTOR_KG_KWH = 0.79
 
