@@ -699,3 +699,50 @@ class TestFluxSignAccounting:
         flux = march_interior_flux(weather, stack, np.array([0.9, COOL_ROOF_ABSORPTANCE]), dt_s=40.0)
         out = annual_benefit(flux[:, :1], flux[:, 1:], weather, [100.0])
         assert out.loc[0, "electricity_saved_kwh_yr_fluxsign"] <= out.loc[0, "electricity_saved_kwh_yr"]
+
+
+# ── Hourly export (tools.export_hourly_flux) ─────────────────────────────────
+class TestHourlyScenarioFlux:
+    def test_hourly_rows_integrate_to_run_model_annual_columns(self, weather_df):
+        from stage3_thermal.heat_ingress_model import hourly_scenario_flux
+
+        df = pd.DataFrame(
+            {
+                "building_id": ["a", "b"],
+                "absorptance_before": [0.8, 0.6],
+                "roof_surface_area_m2": [150.0, 90.0],
+                "roof_material": ["metal_dark", "terracotta"],
+            }
+        )
+        hourly = hourly_scenario_flux(df, weather_df)
+        annual = run_model(df, weather_df, coolmax=True)
+
+        assert len(hourly) == 2 * (len(weather_df) - 1)
+        counted = hourly[~hourly["spin_up"]]
+        for i, bid in enumerate(df["building_id"]):
+            rows = counted[counted["building_id"] == bid]
+            np.testing.assert_allclose(
+                rows["flux_existing_wh_m2"].sum() / 1000.0,
+                annual.loc[i, "roof_heat_ingress_base_kwh_m2_yr"], atol=0.01,
+            )
+            np.testing.assert_allclose(
+                rows["flux_coated_wh_m2"].sum() / 1000.0,
+                annual.loc[i, "roof_heat_ingress_cool_kwh_m2_yr"], atol=0.01,
+            )
+            cooling = rows[rows["hvac_mode"] == "cooling"]
+            np.testing.assert_allclose(
+                max(0.0, (cooling["heat_existing_kwh"] - cooling["heat_coated_kwh"]).sum()),
+                annual.loc[i, "cooling_season_heat_avoided_kwh_yr"], atol=0.1,
+            )
+            np.testing.assert_allclose(
+                rows["heat_existing_kwh"], rows["flux_existing_wh_m2"] * rows["roof_surface_area_m2"] / 1000.0,
+            )
+        # Coolmax hourly matches the --coolmax annual roll-up.
+        weather = build_hourly_weather(weather_df)
+        for i, bid in enumerate(df["building_id"]):
+            rows = hourly[hourly["building_id"] == bid]
+            out = annual_benefit(
+                rows[["flux_existing_wh_m2"]].to_numpy(), rows[["flux_coolmax_wh_m2"]].to_numpy(),
+                weather, [df.loc[i, "roof_surface_area_m2"]],
+            )
+            assert out.loc[0, "net_electricity_saved_kwh_yr"] == annual.loc[i, "net_electricity_saved_kwh_yr_coolmax"]
