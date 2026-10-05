@@ -4,6 +4,39 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-10-05 — Open: two parallel hourly-export implementations, needs consolidation
+
+**Situation:** Two independent solutions to the same need (Angus wanting
+hourly per-building roof flux with area, not just the annual rollup) landed
+at the same time from different directions and were merged together without
+picking a winner:
+
+1. `tools/export_hourly_flux.py` (`hourly_scenario_flux()`) — PR #15, merged
+   to `origin/main` 2026-10-02/05. A standalone script that re-marches
+   selected buildings and writes `flux_existing/coated/coolmax_wh_m2` +
+   `heat_*_kwh` (thermal, pre-COP), plus `hvac_mode`/`spin_up` flag columns.
+2. `run_model(hourly_sink=...)` / `run_stage3 --hourly` (this branch,
+   2026-10-05) — wired into the main Stage 3 run itself: every group's march
+   is captured as it happens (no re-marching), writing
+   `flux_base/cool/coolmax_wh_m2` + `electricity_saved_*_wh` (post-COP,
+   post-cooling_fraction/heating_fraction) to
+   `data/output/stage3_{suburb}_hourly.parquet`.
+
+**Why both were kept:** they merged with no textual conflicts, and dropping
+either unilaterally would throw away either a GitHub-reviewed tool or a
+same-day fix pass with its own test coverage, on a call that's really
+Ryan/Seamus's to make, not an agent's.
+
+**Still open:** pick one, or scope them to genuinely different jobs (e.g.
+`export_hourly_flux` for ad-hoc investigation of a handful of buildings,
+`--hourly` for the full-suburb economics pass) and document the split. If
+merged into one, reconcile the column semantics first — `heat_*_kwh` is
+thermal while `electricity_saved_*_wh` is post-COP, and a careless merge
+could silently mix the two the way the original ad-hoc file that motivated
+PR #15 already did ("Angus ... guessed cool meant Coolmax").
+
+---
+
 ## 2026-10-05 — Ported Final_Heat_Ingress_Model.ipynb's fix pass into the Stage 3 engine
 
 **Decision:** A new `Final_Heat_Ingress_Model - FIXED.ipynb` replaced the
