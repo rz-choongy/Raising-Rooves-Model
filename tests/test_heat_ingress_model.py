@@ -2,7 +2,8 @@
 Tests for stage3_thermal/heat_ingress_model.py — the vectorised transient roof
 heat-ingress engine that replaced the inferred-R_roof thermal_calculator, and
 that itself was ported from Final_Heat_Ingress_Model.ipynb (2026-09-19,
-superseding the earlier heat_ingress_model.ipynb).
+superseding the earlier heat_ingress_model.ipynb; outer-skin series-resistance
+and sky/ground view-factor fixes folded in 2026-10-05).
 
 Covers:
 - Roof stack loading, per-material emissivity, four-way material mapping
@@ -94,6 +95,8 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
     thick = stack.thickness_m
     emissivity = stack.emissivity
     cos_tilt = abs(math.cos(math.radians(HEAT_INGRESS_ROOF_TILT_DEG)))
+    f_sky = 0.5 * (1.0 + cos_tilt)
+    f_ground = 1.0 - f_sky
     const = _STEFAN_BOLTZMANN_W_M2K4
     rad_coeff = emissivity * const
     T_heat = HEAT_INGRESS_HEATING_SETPOINT_C + _KELVIN
@@ -130,8 +133,11 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
             q = np.zeros(5)
             q[0] = (
                 shortwave[ts]
-                + ho[ts] * (outside[ts] - mid[0])
-                + rad_coeff * (sky ** 4 - mid[0] ** 4)
+                + (outside[ts] - mid[0]) / (1.0 / ho[ts] + r0 / 2.0)
+                + rad_coeff * (
+                    f_sky * (sky ** 4 - mid[0] ** 4)
+                    + f_ground * (outside[ts] ** 4 - mid[0] ** 4)
+                )
             )
 
             delta_a = mid[0] - mid[1]

@@ -29,6 +29,25 @@ Two physics decisions came from the final notebook port:
     as does the inner lining→indoor face — replacing the previous fixed
     cavity-R override and fixed internal-h constant.
 
+Two further corrections came from ``Final_Heat_Ingress_Model.ipynb``'s
+2026-10-05 fix pass (the single-building reference was carrying the same two
+bugs this port had inherited):
+  * The outer-skin boundary now couples to outside air through the correct
+    series resistance ``1 / (1/h_ext + R_outer_skin/2)``, matching how every
+    other layer face in the march is modelled — it previously used bare
+    ``h_ext * (T_air - T_outer_skin)``, implicitly treating the outer skin as
+    having zero conductive resistance of its own.
+  * Outer-skin long-wave loss now splits between sky and ground by a
+    tilt-dependent view factor (``F_sky = 0.5*(1+cos(tilt))``, radiating the
+    remainder to ambient air as a ground-temperature proxy) instead of
+    radiating 100% to the sky — material for a horizontal roof, visible for a
+    pitched one.
+A third notebook change (per-house adaptive cavity thickness / wind-profile
+height, driven by ``roof_plan_area``) was deliberately NOT ported: it needs a
+per-building plan-area input the pipeline doesn't carry yet and overlaps with
+roadmap item #2 (per-building pitch wiring) — tracked as follow-up, not
+folded in silently.
+
 Stage 3 cool-roof saving per building = march the model at the building's current
 solar absorptance and again at the cool coating appropriate to its roof type
 (``COOL_ROOF_ABSORPTANCE_BY_STACK``), then difference the
@@ -363,9 +382,13 @@ def max_stable_timestep(stack: RoofStack, h_ext_max_w_m2k: float) -> float:
         face_conductance[cav] = 1.0 / (1.0 / h_horizontal_max + r[cav + 1] / 2.0)
 
     inner_conductance = 1.0 / (r[-1] / 2.0 + 1.0 / h_horizontal_max)
+    # Outer skin <-> outside air goes through the skin's own half R-value in
+    # series with the film coefficient, same as every other layer face below
+    # — not bare h_ext (see module docstring, 2026-10-05 fix pass).
+    outer_conductance = 1.0 / (1.0 / h_ext_max_w_m2k + r[0] / 2.0)
     conductance_sum = np.concatenate(
         [
-            [h_ext_max_w_m2k + face_conductance[0]],
+            [outer_conductance + face_conductance[0]],
             face_conductance[:-1] + face_conductance[1:],
             [face_conductance[-1] + inner_conductance],
         ]
@@ -420,6 +443,7 @@ def _march_kernel(
     heating_setpoint_k,
     cooling_setpoint_k,
     cos_tilt,        # |cos(roof tilt)|, outer_skin<->airspace face only
+    f_sky, f_ground,  # outer-skin long-wave view factors (sky vs ground), sum to 1
     mid_init,        # (4, B)
     out,             # (H-1, B)
 ):
@@ -497,8 +521,11 @@ def _march_kernel(
 
                 q_outer = (
                     a * inc
-                    + hx * (t_out - m0)
-                    + rad_coeff * (sky * sky * sky * sky - m0 * m0 * m0 * m0)
+                    + (t_out - m0) / (1.0 / hx + r0 / 2.0)
+                    + rad_coeff * (
+                        f_sky * (sky * sky * sky * sky - m0 * m0 * m0 * m0)
+                        + f_ground * (t_out * t_out * t_out * t_out - m0 * m0 * m0 * m0)
+                    )
                 )
 
                 # Adaptive natural convection: outer_skin <-> airspace (tilted).
@@ -543,7 +570,7 @@ def _march_numpy(
     temp_k, incident, h_ext, humidity, hour_of_day,
     absorptance, emissivity, r0, r2, r3, cap0, cap1, cap2, cap3,
     dt, substeps, heating_setpoint_k, cooling_setpoint_k,
-    cos_tilt, mid,
+    cos_tilt, f_sky, f_ground, mid,
 ):
     # r2/cap2 may be scalar (shared insulation) or (B,) (per-scenario
     # insulation upgrade) -- numpy broadcasting handles both transparently.
@@ -582,8 +609,11 @@ def _march_numpy(
 
                 q_outer = (
                     absorptance * inc
-                    + hx * (t_out - mid[0])
-                    + rad_coeff * (sky ** 4 - mid[0] ** 4)
+                    + (t_out - mid[0]) / (1.0 / hx + r0 / 2.0)
+                    + rad_coeff * (
+                        f_sky * (sky ** 4 - mid[0] ** 4)
+                        + f_ground * (t_out ** 4 - mid[0] ** 4)
+                    )
                 )
 
                 delta_a = mid[0] - mid[1]
@@ -657,7 +687,8 @@ def march_interior_flux(
             value) broadcast to every building -- pass ``stack.emissivity_cool``
             for a cool-roof scenario march.
         roof_tilt_deg: Roof pitch used by the airspace's outer-facing adaptive
-            convection coefficient. Defaults to
+            convection coefficient, and by the outer skin's sky/ground
+            long-wave view factor (``F_sky = 0.5*(1+cos(tilt))``). Defaults to
             ``config.settings.HEAT_INGRESS_ROOF_TILT_DEG``.
         insulation_r_m2k_w / insulation_thickness_m: Scalar or length-``B``
             override for the insulation layer's R-value / thickness. Default
@@ -729,6 +760,10 @@ def march_interior_flux(
     heating_setpoint_k = heating_setpoint_c + _KELVIN
     cooling_setpoint_k = cooling_setpoint_c + _KELVIN
     cos_tilt = abs(math.cos(math.radians(roof_tilt_deg)))
+    # Outer-skin long-wave view factors: sky vs ground, tilt-dependent
+    # (horizontal roof -> all sky; near-vertical -> half-half).
+    f_sky = 0.5 * (1.0 + cos_tilt)
+    f_ground = 1.0 - f_sky
 
     if initial_temps_k is None:
         mid = np.full((n_layers, n_buildings), temp_k[0], dtype=float)
@@ -749,7 +784,7 @@ def march_interior_flux(
             r[0], r2_arr, r[3],
             cap[0], cap[1], cap2_arr, cap[3],
             dt, substeps, heating_setpoint_k, cooling_setpoint_k,
-            cos_tilt, np.ascontiguousarray(mid), out,
+            cos_tilt, f_sky, f_ground, np.ascontiguousarray(mid), out,
         )
     else:
         out = _march_numpy(
@@ -757,7 +792,7 @@ def march_interior_flux(
             absorptance, emissivity_arr, r[0], r2_arr, r[3],
             cap[0], cap[1], cap2_arr, cap[3],
             dt, substeps, heating_setpoint_k, cooling_setpoint_k,
-            cos_tilt, mid,
+            cos_tilt, f_sky, f_ground, mid,
         )
 
     if not np.all(np.isfinite(out)):

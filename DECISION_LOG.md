@@ -4,6 +4,60 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-10-05 — Ported Final_Heat_Ingress_Model.ipynb's fix pass into the Stage 3 engine
+
+**Decision:** A new `Final_Heat_Ingress_Model - FIXED.ipynb` replaced the
+committed single-building reference notebook. Diffing it against the
+2026-09-19 version found two real bugs shared with the vectorised
+`stage3_thermal/heat_ingress_model.py` port, both fixed there the same way:
+
+1. **Outer-skin boundary conduction.** The outer skin coupled to outside air
+   through bare `h_ext·(T_out − T_outer)`, i.e. zero conductive resistance of
+   its own — every other layer face in the march combines its film
+   coefficient with the adjacent layer's half R-value in series, but the
+   outer boundary never did. Fixed to
+   `(T_out − T_outer) / (1/h_ext + R_outer_skin/2)`, and
+   `max_stable_timestep`'s stability bound updated to match (otherwise it
+   would under-estimate the true conductance and over-estimate the safe
+   timestep).
+2. **Outer-skin long-wave view factor.** Radiative loss went 100% to the sky
+   regardless of roof pitch. Fixed to split sky vs ground by
+   `F_sky = 0.5·(1 + cos(tilt))` (`F_ground = 1 − F_sky`), radiating the
+   ground fraction against ambient air as a ground-temperature proxy — a
+   horizontal roof still sees ~100% sky, a pitched one sees measurably more
+   ground.
+
+**Not ported:** the notebook's third change that day — per-house adaptive
+airspace thickness and wind-profile height `Z`, both driven by a
+`roof_plan_area` input (assuming a 2:1 rectangular footprint) — was left out.
+The vectorised engine has no per-building (or even global) plan-area input
+wired into the thermal march today, and adding one overlaps with the
+still-open per-building `pitch_deg` roadmap item (airspace tilt is currently
+one global `HEAT_INGRESS_ROOF_TILT_DEG`, same scoping the notebook itself
+uses). Treating it as separate follow-up rather than folding it in silently.
+
+**Also checked and found already correct in the `.py` port** (i.e. bugs the
+old notebook had that the port never inherited): the airspace↔insulation face
+resistance combination, and a mixed-up `hi`/`hi_cool` ceiling-temperature
+variable in the notebook's single-building scalars (moot once every
+building's march state is independent, as it already is here). The PV-panel
+terms the notebook fix also touched (`G_pv`, `f_pv`, `h_pv_gap`, …) never
+applied — the vectorised engine never modelled PV coverage.
+
+**File cleanup:** `stage3_thermal/heat_ingress_model.ipynb` — already
+superseded as of the 2026-09-19 port and kept only "for history" — deleted
+outright. The old `Final_Heat_Ingress_Model.ipynb` was deleted and the FIXED
+notebook renamed to take its place, keeping the filename every docstring/
+README reference already points to.
+
+**Confirmed test parity:** `tests/test_heat_ingress_model.py`'s scalar
+reference re-implementation (`_notebook_reference_flux`) updated with the
+same two fixes so the production/reference parity test
+(`test_matches_notebook_reference`) stays meaningful. Full suite (174 tests)
+passes.
+
+---
+
 ## 2026-10-01 — Pricing columns and Colorbond Coolmax re-roof scenario
 
 **Decision:** Stage 3 now writes `roof_type` (concrete / metal_light /
