@@ -45,6 +45,12 @@ Colorbond Coolmax steel):
 cooling_electricity_saved_kwh_yr_coolmax,
 heating_penalty_electricity_kwh_yr_coolmax,
 net_electricity_saved_kwh_yr_coolmax. See DECISION_LOG.md 2026-10-01.
+
+Passing --hourly additionally writes
+data/output/stage3_{suburb_key}_hourly.parquet: the full hourly current vs
+cool-roof interior-flux march, long format (building_id, time_melbourne,
+roof_construction, flux_base_wh_m2, flux_cool_wh_m2), before spin-up is
+discarded and before the annual rollup in annual_benefit(). No CSV twin.
 """
 
 from __future__ import annotations
@@ -60,7 +66,7 @@ from config.settings import (
     OUTPUT_DIR,
 )
 from config.suburbs import Suburb, get_suburb
-from shared.file_io import ensure_dir, load_stage_input, save_stage_outputs
+from shared.file_io import ensure_dir, load_stage_input, save_parquet, save_stage_outputs
 from shared.logging_config import setup_logging
 from stage3_thermal.heat_ingress_model import run_model
 
@@ -145,6 +151,7 @@ def run_stage3(
     insulation_r_upgrade_m2k_w: float | None = None,
     insulation_thickness_upgrade_m: float | None = None,
     coolmax: bool = False,
+    hourly: bool = False,
 ) -> pd.DataFrame:
     """
     Run the full Stage 3 heat-ingress pipeline for a suburb.
@@ -164,6 +171,13 @@ def run_stage3(
             thickness).
         coolmax: Opt-in Colorbond Coolmax re-roof scenario (see
             ``heat_ingress_model.run_model``). Adds ``*_coolmax`` columns.
+        hourly: Opt-in -- also write every building's full hourly current vs
+            cool-roof interior-flux march (Wh/m2, pre-spin-up-discard,
+            pre-annual-rollup) to
+            ``data/output/stage3_{suburb_key}_hourly.parquet`` (long format:
+            building_id, time_melbourne, roof_construction, flux_base_wh_m2,
+            flux_cool_wh_m2). No CSV twin -- one suburb-year is millions of
+            rows. Default False leaves Stage 3's existing output unchanged.
 
     Returns:
         DataFrame with all Stage 2 columns plus the Stage 3 thermal columns.
@@ -190,11 +204,13 @@ def run_stage3(
 
     # ── Step 3: Transient model per building ──────────────────────────────────
     logger.info("Step 3/3: Marching the transient roof model per building...")
+    hourly_sink: list[pd.DataFrame] | None = [] if hourly else None
     thermal_df = run_model(
         df, weather_df,
         insulation_r_upgrade_m2k_w=insulation_r_upgrade_m2k_w,
         insulation_thickness_upgrade_m=insulation_thickness_upgrade_m,
         coolmax=coolmax,
+        hourly_sink=hourly_sink,
     )
     df = pd.concat([df.reset_index(drop=True), thermal_df.reset_index(drop=True)], axis=1)
 
@@ -251,6 +267,16 @@ def run_stage3(
 
     # ── Save outputs ──────────────────────────────────────────────────────────
     save_stage_outputs(df, 3, suburb_key)
+
+    if hourly_sink is not None:
+        hourly_df = pd.concat(hourly_sink, ignore_index=True)
+        hourly_path = OUTPUT_DIR / f"stage3_{suburb_key}_hourly.parquet"
+        save_parquet(hourly_df, hourly_path)
+        logger.info(
+            "Saved %s (%d rows: %d buildings x %d hourly intervals).",
+            hourly_path.name, len(hourly_df), hourly_df["building_id"].nunique(),
+            len(hourly_df) // max(1, hourly_df["building_id"].nunique()),
+        )
 
     logger.info("=" * 60)
     logger.info("Stage 3 complete for %s.", suburb.name)

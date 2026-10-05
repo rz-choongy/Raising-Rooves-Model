@@ -488,6 +488,49 @@ class TestRunModel:
         out = run_model(df, weather_df, roof_stack=stack)
         assert out["cool_absorptance_applied"].iloc[0] == COOL_ROOF_ABSORPTANCE
 
+    def test_hourly_sink_collects_full_march(self, weather_df, weather, stack):
+        df = pd.DataFrame(
+            {
+                "building_id": ["b0", "b1"],
+                "absorptance_before": [0.85, 0.45],
+                "roof_surface_area_m2": [120.0, 80.0],
+            },
+            index=[10, 11],
+        )
+        sink: list[pd.DataFrame] = []
+        out = run_model(df, weather_df, roof_stack=stack, hourly_sink=sink)
+
+        n_intervals = weather.n_hours - 1
+        hourly = pd.concat(sink, ignore_index=True)
+        assert len(hourly) == n_intervals * len(df)
+        assert set(hourly["building_id"]) == {"b0", "b1"}
+        assert (hourly["roof_construction"] == "_single").all()
+        assert hourly["time_melbourne"].nunique() == n_intervals
+
+        # The sink is the pre-rollup march; feeding it back through
+        # annual_benefit (same default spin_up_hours run_model itself uses)
+        # should reconstruct the same headline annual figure for each building.
+        b0 = hourly[hourly["building_id"] == "b0"].sort_values("time_melbourne")
+        reference = annual_benefit(
+            b0["flux_base_wh_m2"].to_numpy().reshape(-1, 1),
+            b0["flux_cool_wh_m2"].to_numpy().reshape(-1, 1),
+            weather, [120.0],
+        )
+        assert reference["net_electricity_saved_kwh_yr"].iloc[0] == pytest.approx(
+            out.loc[10, "net_electricity_saved_kwh_yr"]
+        )
+        # The autumn fixture (May 2007) has a non-trivial heating penalty even
+        # though it has no cooling-season hours, so this isn't a vacuous check.
+        assert out.loc[10, "heating_penalty_electricity_kwh_yr"] != pytest.approx(0.0)
+
+    def test_hourly_sink_falls_back_to_index_without_building_id(self, weather_df, stack):
+        df = pd.DataFrame(
+            {"absorptance_before": [0.8], "roof_surface_area_m2": [100.0]}, index=[7],
+        )
+        sink: list[pd.DataFrame] = []
+        run_model(df, weather_df, roof_stack=stack, hourly_sink=sink)
+        assert (pd.concat(sink)["building_id"] == 7).all()
+
 
 # ── Insulation-upgrade scenario (opt-in) ─────────────────────────────────────
 class TestInsulationMarch:

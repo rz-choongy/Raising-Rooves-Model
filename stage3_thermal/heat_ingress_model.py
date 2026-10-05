@@ -1063,6 +1063,8 @@ def run_model(
     insulation_r_upgrade_m2k_w: float | None = None,
     insulation_thickness_upgrade_m: float | None = None,
     coolmax: bool = False,
+    building_id_col: str = "building_id",
+    hourly_sink: list[pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """
     End-to-end Stage 3 engine: per-building transient benefit for one suburb.
@@ -1106,6 +1108,17 @@ def run_model(
             absorptance: tile, steel or slate) with a Colorbond Coolmax
             steel-deck roof (``COOLMAX_ABSORPTANCE``/``COOLMAX_EMISSIVITY``).
             Adds :data:`_COOLMAX_OUTPUT_COLUMNS` (existing − Coolmax).
+        building_id_col: Column identifying each building, used only to label
+            rows appended to ``hourly_sink`` (falls back to ``df.index`` if
+            absent).
+        hourly_sink: Opt-in -- when a list is passed, every group's full
+            hourly current/cool interior-flux march (before spin-up is
+            discarded and before the annual rollup) is appended to it as a
+            long-format DataFrame (``building_id``, ``time_melbourne``,
+            ``roof_construction``, ``flux_base_wh_m2``, ``flux_cool_wh_m2``,
+            Wh/m2, positive = heat into the interior). ``None`` (default)
+            skips this -- it roughly doubles memory use since nothing here is
+            sized for a whole suburb's hourly series otherwise.
 
     Every result carries ``roof_type`` (concrete / metal_light / metal_dark /
     slate / terracotta) and ``coating_type`` (which cool coating was applied,
@@ -1204,6 +1217,24 @@ def run_model(
             insulation_thickness_m=_stack_col(3),
         )
         cols = {name: flux[:, i * n:(i + 1) * n] for i, name in enumerate(scenarios)}
+
+        if hourly_sink is not None:
+            base, cool = cols["current"], cols["cool"]
+            n_intervals = base.shape[0]
+            group_index = df.index[mask]
+            ids = (
+                df.loc[group_index, building_id_col].to_numpy()
+                if building_id_col in df.columns
+                else group_index.to_numpy()
+            )
+            hourly_sink.append(pd.DataFrame({
+                "building_id": np.repeat(ids, n_intervals),
+                "time_melbourne": np.tile(weather.time_melbourne[:n_intervals], n),
+                "roof_construction": key,
+                "flux_base_wh_m2": base.T.reshape(-1),
+                "flux_cool_wh_m2": cool.T.reshape(-1),
+            }))
+
         group_result = annual_benefit(cols["current"], cols["cool"], weather, area, building_type)
         if "insulation" in cols:
             insulation_result = annual_benefit_insulation(

@@ -11,6 +11,7 @@ Usage:
     python -m stage3_thermal.run_stage3 --suburb Carlton --year 2007 --debug
     python -m stage3_thermal.run_stage3 --suburb Carlton --weather-csv path/to/hourly.csv
     python -m stage3_thermal.run_stage3 --suburb Carlton --insulation-r-upgrade 4.1
+    python -m stage3_thermal.run_stage3 --suburb Carlton --hourly
     python -m stage3_thermal.run_stage3 --list-suburbs
 
 Prerequisites:
@@ -24,6 +25,7 @@ Prerequisites:
 Output files:
     data/output/stage3_{suburb}.parquet
     data/output/stage3_{suburb}.csv
+    data/output/stage3_{suburb}_hourly.parquet  (only with --hourly)
 """
 
 import argparse
@@ -95,6 +97,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--hourly",
+        action="store_true",
+        help=(
+            "Opt-in: also write every building's full hourly current vs "
+            "cool-roof interior-flux march to "
+            "data/output/stage3_{suburb}_hourly.parquet (long format, Wh/m2, "
+            "no CSV twin -- one suburb-year is millions of rows)."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug-level logging",
@@ -128,6 +140,7 @@ def main() -> None:
             insulation_r_upgrade_m2k_w=args.insulation_r_upgrade,
             insulation_thickness_upgrade_m=args.insulation_thickness_upgrade,
             coolmax=args.coolmax,
+            hourly=args.hourly,
         )
         if df.empty:
             logger.warning("No results produced. Check logs for details.")
