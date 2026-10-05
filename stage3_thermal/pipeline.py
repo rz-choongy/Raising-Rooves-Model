@@ -49,8 +49,10 @@ net_electricity_saved_kwh_yr_coolmax. See DECISION_LOG.md 2026-10-01.
 Passing --hourly additionally writes
 data/output/stage3_{suburb_key}_hourly.parquet: the full hourly current vs
 cool-roof interior-flux march, long format (building_id, time_melbourne,
-roof_construction, flux_base_wh_m2, flux_cool_wh_m2), before spin-up is
-discarded and before the annual rollup in annual_benefit(). No CSV twin.
+roof_construction, roof_surface_area_m2, flux_base_wh_m2, flux_cool_wh_m2,
+energy_saved_cool_wh -- plus flux_coolmax_wh_m2/energy_saved_coolmax_wh when
+--coolmax is also passed), before spin-up is discarded and before the annual
+rollup in annual_benefit(). No CSV twin.
 """
 
 from __future__ import annotations
@@ -175,9 +177,12 @@ def run_stage3(
             cool-roof interior-flux march (Wh/m2, pre-spin-up-discard,
             pre-annual-rollup) to
             ``data/output/stage3_{suburb_key}_hourly.parquet`` (long format:
-            building_id, time_melbourne, roof_construction, flux_base_wh_m2,
-            flux_cool_wh_m2). No CSV twin -- one suburb-year is millions of
-            rows. Default False leaves Stage 3's existing output unchanged.
+            building_id, time_melbourne, roof_construction,
+            roof_surface_area_m2, flux_base_wh_m2, flux_cool_wh_m2,
+            energy_saved_cool_wh -- plus flux_coolmax_wh_m2 /
+            energy_saved_coolmax_wh when ``coolmax=True``). No CSV twin --
+            one suburb-year is millions of rows. Default False leaves Stage
+            3's existing output unchanged.
 
     Returns:
         DataFrame with all Stage 2 columns plus the Stage 3 thermal columns.

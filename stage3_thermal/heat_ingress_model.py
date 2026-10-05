@@ -1149,11 +1149,19 @@ def run_model(
         hourly_sink: Opt-in -- when a list is passed, every group's full
             hourly current/cool interior-flux march (before spin-up is
             discarded and before the annual rollup) is appended to it as a
-            long-format DataFrame (``building_id``, ``time_melbourne``,
-            ``roof_construction``, ``flux_base_wh_m2``, ``flux_cool_wh_m2``,
-            Wh/m2, positive = heat into the interior). ``None`` (default)
-            skips this -- it roughly doubles memory use since nothing here is
-            sized for a whole suburb's hourly series otherwise.
+            long-format DataFrame: ``building_id``, ``time_melbourne``,
+            ``roof_construction``, ``roof_surface_area_m2``,
+            ``flux_base_wh_m2``, ``flux_cool_wh_m2`` (Wh/m2, positive = heat
+            into the interior), and ``energy_saved_cool_wh`` (per-building
+            thermal energy the cool coating kept out this hour --
+            ``(flux_base - flux_cool) * roof_surface_area_m2``; *thermal*,
+            not electricity -- no ``cooling_fraction``/COP applied, same as
+            the flux columns). When ``coolmax=True`` also adds
+            ``flux_coolmax_wh_m2`` and ``energy_saved_coolmax_wh`` (same
+            shape, existing roof vs the Coolmax replacement). ``None``
+            (default) skips this -- it roughly doubles memory use since
+            nothing here is sized for a whole suburb's hourly series
+            otherwise.
 
     Every result carries ``roof_type`` (concrete / metal_light / metal_dark /
     slate / terracotta) and ``coating_type`` (which cool coating was applied,
@@ -1253,23 +1261,6 @@ def run_model(
         )
         cols = {name: flux[:, i * n:(i + 1) * n] for i, name in enumerate(scenarios)}
 
-        if hourly_sink is not None:
-            base, cool = cols["current"], cols["cool"]
-            n_intervals = base.shape[0]
-            group_index = df.index[mask]
-            ids = (
-                df.loc[group_index, building_id_col].to_numpy()
-                if building_id_col in df.columns
-                else group_index.to_numpy()
-            )
-            hourly_sink.append(pd.DataFrame({
-                "building_id": np.repeat(ids, n_intervals),
-                "time_melbourne": np.tile(weather.time_melbourne[:n_intervals], n),
-                "roof_construction": key,
-                "flux_base_wh_m2": base.T.reshape(-1),
-                "flux_cool_wh_m2": cool.T.reshape(-1),
-            }))
-
         group_result = annual_benefit(cols["current"], cols["cool"], weather, area, building_type)
         if "insulation" in cols:
             insulation_result = annual_benefit_insulation(
@@ -1282,6 +1273,7 @@ def run_model(
         group_result.insert(2, "cool_emissivity_applied", stack.emissivity_cool)
         group_result.index = df.index[mask]
         results.append(group_result)
+        flux_coolmax = None
         if coolmax:
             if reroof_in_group:
                 flux_coolmax = cols["coolmax"]
@@ -1298,6 +1290,37 @@ def run_model(
                 _coolmax_columns(cols["current"], flux_coolmax, weather, area,
                                  building_type, df.index[mask])
             )
+
+        if hourly_sink is not None:
+            base, cool = cols["current"], cols["cool"]
+            n_intervals = base.shape[0]
+            group_index = df.index[mask]
+            ids = (
+                df.loc[group_index, building_id_col].to_numpy()
+                if building_id_col in df.columns
+                else group_index.to_numpy()
+            )
+            # Building-major flattening (every building's full hourly run,
+            # then the next building) -- matches np.repeat(ids, n_intervals).
+            area_flat = np.repeat(area, n_intervals)
+            hourly_cols = {
+                "building_id": np.repeat(ids, n_intervals),
+                "time_melbourne": np.tile(weather.time_melbourne[:n_intervals], n),
+                "roof_construction": key,
+                "roof_surface_area_m2": area_flat,
+                "flux_base_wh_m2": base.T.reshape(-1),
+                "flux_cool_wh_m2": cool.T.reshape(-1),
+                # Per-building thermal energy avoided this hour by the cool-roof
+                # coating (base - cool) x area, Wh -- *not* electricity: no
+                # cooling_fraction/COP applied, same as the flux_*_wh_m2 columns.
+                "energy_saved_cool_wh": (base - cool).T.reshape(-1) * area_flat,
+            }
+            if flux_coolmax is not None:
+                hourly_cols["flux_coolmax_wh_m2"] = flux_coolmax.T.reshape(-1)
+                hourly_cols["energy_saved_coolmax_wh"] = (
+                    (base - flux_coolmax).T.reshape(-1) * area_flat
+                )
+            hourly_sink.append(pd.DataFrame(hourly_cols))
 
     result = pd.concat(results).loc[df.index]
     if coolmax:

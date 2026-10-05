@@ -439,8 +439,13 @@ Output files:
 - `data/output/stage3_{suburb}_hourly.parquet` — only with `--hourly`: the full
   hourly current-vs-cool-roof interior heat-flux march (Wh/m², before spin-up
   is discarded and before the annual rollup), long format —
-  `building_id`, `time_melbourne`, `roof_construction`, `flux_base_wh_m2`,
-  `flux_cool_wh_m2`. No CSV twin; one suburb-year is millions of rows.
+  `building_id`, `time_melbourne`, `roof_construction`, `roof_surface_area_m2`,
+  `flux_base_wh_m2`, `flux_cool_wh_m2`, `energy_saved_cool_wh` (per-building
+  *thermal* energy, `(flux_base − flux_cool) × roof_surface_area_m2` — not
+  electricity, no `cooling_fraction`/COP applied, same as the flux columns).
+  Also with `--coolmax`: `flux_coolmax_wh_m2` and `energy_saved_coolmax_wh`
+  (existing roof vs the Coolmax replacement, same convention). No CSV twin;
+  one suburb-year is millions of rows.
 
 ### Stage 3 Model
 

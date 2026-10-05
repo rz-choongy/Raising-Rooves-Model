@@ -512,11 +512,18 @@ class TestRunModel:
         assert set(hourly["building_id"]) == {"b0", "b1"}
         assert (hourly["roof_construction"] == "_single").all()
         assert hourly["time_melbourne"].nunique() == n_intervals
+        assert "flux_coolmax_wh_m2" not in hourly.columns  # coolmax=False (default)
+
+        b0 = hourly[hourly["building_id"] == "b0"].sort_values("time_melbourne")
+        assert (b0["roof_surface_area_m2"] == 120.0).all()
+        np.testing.assert_allclose(
+            b0["energy_saved_cool_wh"].to_numpy(),
+            (b0["flux_base_wh_m2"] - b0["flux_cool_wh_m2"]).to_numpy() * 120.0,
+        )
 
         # The sink is the pre-rollup march; feeding it back through
         # annual_benefit (same default spin_up_hours run_model itself uses)
         # should reconstruct the same headline annual figure for each building.
-        b0 = hourly[hourly["building_id"] == "b0"].sort_values("time_melbourne")
         reference = annual_benefit(
             b0["flux_base_wh_m2"].to_numpy().reshape(-1, 1),
             b0["flux_cool_wh_m2"].to_numpy().reshape(-1, 1),
@@ -528,6 +535,35 @@ class TestRunModel:
         # The autumn fixture (May 2007) has a non-trivial heating penalty even
         # though it has no cooling-season hours, so this isn't a vacuous check.
         assert out.loc[10, "heating_penalty_electricity_kwh_yr"] != pytest.approx(0.0)
+
+    def test_hourly_sink_with_coolmax_adds_coolmax_columns(self, weather_df, weather, stack):
+        df = pd.DataFrame(
+            {
+                "building_id": ["b0"],
+                "absorptance_before": [0.85],
+                "roof_surface_area_m2": [150.0],
+            },
+            index=[0],
+        )
+        sink: list[pd.DataFrame] = []
+        out = run_model(df, weather_df, roof_stack=stack, coolmax=True, hourly_sink=sink)
+
+        hourly = pd.concat(sink, ignore_index=True).sort_values("time_melbourne")
+        np.testing.assert_allclose(
+            hourly["energy_saved_coolmax_wh"].to_numpy(),
+            (hourly["flux_base_wh_m2"] - hourly["flux_coolmax_wh_m2"]).to_numpy() * 150.0,
+        )
+
+        # Same reconstruction check as the plain-cool case, against the
+        # *_coolmax annual columns this time.
+        reference = annual_benefit(
+            hourly["flux_base_wh_m2"].to_numpy().reshape(-1, 1),
+            hourly["flux_coolmax_wh_m2"].to_numpy().reshape(-1, 1),
+            weather, [150.0],
+        )
+        assert reference["net_electricity_saved_kwh_yr"].iloc[0] == pytest.approx(
+            out.loc[0, "net_electricity_saved_kwh_yr_coolmax"]
+        )
 
     def test_hourly_sink_falls_back_to_index_without_building_id(self, weather_df, stack):
         df = pd.DataFrame(
