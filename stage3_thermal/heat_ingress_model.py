@@ -1152,13 +1152,18 @@ def run_model(
             long-format DataFrame: ``building_id``, ``time_melbourne``,
             ``roof_construction``, ``roof_surface_area_m2``,
             ``flux_base_wh_m2``, ``flux_cool_wh_m2`` (Wh/m2, positive = heat
-            into the interior), and ``energy_saved_cool_wh`` (per-building
-            thermal energy the cool coating kept out this hour --
-            ``(flux_base - flux_cool) * roof_surface_area_m2``; *thermal*,
-            not electricity -- no ``cooling_fraction``/COP applied, same as
-            the flux columns). When ``coolmax=True`` also adds
-            ``flux_coolmax_wh_m2`` and ``energy_saved_coolmax_wh`` (same
-            shape, existing roof vs the Coolmax replacement). ``None``
+            into the interior), and ``electricity_saved_cool_wh`` --
+            electricity-equivalent, not raw roof thermal flux: ``(flux_base -
+            flux_cool) * roof_surface_area_m2`` scaled by that hour's
+            ``cooling_fraction`` (outdoor temp >= ``CDD_BASE_TEMP``) or
+            ``-heating_fraction`` (otherwise) and the building's HVAC COP --
+            same split ``annual_benefit`` uses, applied per hour instead of
+            to a season sum, so it is an approximation of
+            ``net_electricity_saved_kwh_yr``/yr (exact except where a whole
+            season's raw sum would have been clamped at zero; see the
+            in-loop comment). When ``coolmax=True`` also adds
+            ``flux_coolmax_wh_m2`` and ``electricity_saved_coolmax_wh`` (same
+            convention, existing roof vs the Coolmax replacement). ``None``
             (default) skips this -- it roughly doubles memory use since
             nothing here is sized for a whole suburb's hourly series
             otherwise.
@@ -1303,6 +1308,25 @@ def run_model(
             # Building-major flattening (every building's full hourly run,
             # then the next building) -- matches np.repeat(ids, n_intervals).
             area_flat = np.repeat(area, n_intervals)
+
+            # Same cooling/heating split and COP annual_benefit uses, applied
+            # per hour instead of to a season sum -- lets each row carry a
+            # signed electricity-equivalent contribution (+ve saves, -ve
+            # costs) rather than raw roof thermal flux. cop_group is scalar
+            # per building (building_type doesn't vary hour to hour), so the
+            # per-hour mode (temp >= CDD_BASE_TEMP) is the only thing that
+            # varies down the rows.
+            interval_temp_c = weather.outdoor_temp_c[:n_intervals]
+            cooling_hour = (interval_temp_c >= CDD_BASE_TEMP)[:, None]  # (n_intervals, 1)
+            cop_group = np.array([hvac_cop(b) for b in building_type], dtype=float)  # (n,)
+            mode_factor = (
+                np.where(cooling_hour, COOLING_FRACTION, -HEATING_FRACTION)
+                / cop_group[None, :]
+            )  # (n_intervals, n); heating hours negate the sign (see below)
+
+            def _electricity_wh(delta_wh_m2: np.ndarray) -> np.ndarray:
+                return (delta_wh_m2 * mode_factor * area[None, :]).T.reshape(-1)
+
             hourly_cols = {
                 "building_id": np.repeat(ids, n_intervals),
                 "time_melbourne": np.tile(weather.time_melbourne[:n_intervals], n),
@@ -1310,16 +1334,23 @@ def run_model(
                 "roof_surface_area_m2": area_flat,
                 "flux_base_wh_m2": base.T.reshape(-1),
                 "flux_cool_wh_m2": cool.T.reshape(-1),
-                # Per-building thermal energy avoided this hour by the cool-roof
-                # coating (base - cool) x area, Wh -- *not* electricity: no
-                # cooling_fraction/COP applied, same as the flux_*_wh_m2 columns.
-                "energy_saved_cool_wh": (base - cool).T.reshape(-1) * area_flat,
+                # Per-building electricity-equivalent saved this hour by the
+                # cool-roof coating: +ve in a cooling hour (temp >= CDD_BASE_TEMP)
+                # means less cooling electricity used; -ve in a heating hour
+                # means the coating rejected wanted solar warmth, costing
+                # heating electricity. Summing this column over the year
+                # (excluding the spin-up hours run_model itself discards) is
+                # approximately, not exactly, net_electricity_saved_kwh_yr --
+                # annual_benefit clamps each *season's* sum at >=0 before
+                # applying cooling_fraction/heating_fraction/COP, whereas this
+                # is the unclamped per-hour contribution; they only diverge
+                # for a roof close enough to its own cool-coating target that
+                # one season's raw sum goes slightly negative.
+                "electricity_saved_cool_wh": _electricity_wh(base - cool),
             }
             if flux_coolmax is not None:
                 hourly_cols["flux_coolmax_wh_m2"] = flux_coolmax.T.reshape(-1)
-                hourly_cols["energy_saved_coolmax_wh"] = (
-                    (base - flux_coolmax).T.reshape(-1) * area_flat
-                )
+                hourly_cols["electricity_saved_coolmax_wh"] = _electricity_wh(base - flux_coolmax)
             hourly_sink.append(pd.DataFrame(hourly_cols))
 
     result = pd.concat(results).loc[df.index]

@@ -50,8 +50,8 @@ Passing --hourly additionally writes
 data/output/stage3_{suburb_key}_hourly.parquet: the full hourly current vs
 cool-roof interior-flux march, long format (building_id, time_melbourne,
 roof_construction, roof_surface_area_m2, flux_base_wh_m2, flux_cool_wh_m2,
-energy_saved_cool_wh -- plus flux_coolmax_wh_m2/energy_saved_coolmax_wh when
---coolmax is also passed), before spin-up is discarded and before the annual
+electricity_saved_cool_wh -- plus flux_coolmax_wh_m2/electricity_saved_coolmax_wh
+when --coolmax is also passed), before spin-up is discarded and before the annual
 rollup in annual_benefit(). No CSV twin.
 """
 
@@ -179,10 +179,10 @@ def run_stage3(
             ``data/output/stage3_{suburb_key}_hourly.parquet`` (long format:
             building_id, time_melbourne, roof_construction,
             roof_surface_area_m2, flux_base_wh_m2, flux_cool_wh_m2,
-            energy_saved_cool_wh -- plus flux_coolmax_wh_m2 /
-            energy_saved_coolmax_wh when ``coolmax=True``). No CSV twin --
-            one suburb-year is millions of rows. Default False leaves Stage
-            3's existing output unchanged.
+            electricity_saved_cool_wh -- plus flux_coolmax_wh_m2 /
+            electricity_saved_coolmax_wh when ``coolmax=True``). No CSV twin
+            -- one suburb-year is millions of rows. Default False leaves
+            Stage 3's existing output unchanged.
 
     Returns:
         DataFrame with all Stage 2 columns plus the Stage 3 thermal columns.

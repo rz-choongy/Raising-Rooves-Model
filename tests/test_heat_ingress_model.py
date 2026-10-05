@@ -26,8 +26,11 @@ import pandas as pd
 import pytest
 
 from config.settings import (
+    CDD_BASE_TEMP,
     COOL_ROOF_ABSORPTANCE,
     COOL_ROOF_ABSORPTANCE_BY_STACK,
+    COOLING_FRACTION,
+    HEATING_FRACTION,
     HEAT_INGRESS_COOLING_SETPOINT_C,
     HEAT_INGRESS_HEATING_SETPOINT_C,
     HEAT_INGRESS_ROOF_EMISSIVITY,
@@ -516,9 +519,11 @@ class TestRunModel:
 
         b0 = hourly[hourly["building_id"] == "b0"].sort_values("time_melbourne")
         assert (b0["roof_surface_area_m2"] == 120.0).all()
+        temp = weather.outdoor_temp_c[: len(b0)]
+        factor = np.where(temp >= CDD_BASE_TEMP, COOLING_FRACTION, -HEATING_FRACTION) / hvac_cop(None)
         np.testing.assert_allclose(
-            b0["energy_saved_cool_wh"].to_numpy(),
-            (b0["flux_base_wh_m2"] - b0["flux_cool_wh_m2"]).to_numpy() * 120.0,
+            b0["electricity_saved_cool_wh"].to_numpy(),
+            (b0["flux_base_wh_m2"] - b0["flux_cool_wh_m2"]).to_numpy() * factor * 120.0,
         )
 
         # The sink is the pre-rollup march; feeding it back through
@@ -549,9 +554,11 @@ class TestRunModel:
         out = run_model(df, weather_df, roof_stack=stack, coolmax=True, hourly_sink=sink)
 
         hourly = pd.concat(sink, ignore_index=True).sort_values("time_melbourne")
+        temp = weather.outdoor_temp_c[: len(hourly)]
+        factor = np.where(temp >= CDD_BASE_TEMP, COOLING_FRACTION, -HEATING_FRACTION) / hvac_cop(None)
         np.testing.assert_allclose(
-            hourly["energy_saved_coolmax_wh"].to_numpy(),
-            (hourly["flux_base_wh_m2"] - hourly["flux_coolmax_wh_m2"]).to_numpy() * 150.0,
+            hourly["electricity_saved_coolmax_wh"].to_numpy(),
+            (hourly["flux_base_wh_m2"] - hourly["flux_coolmax_wh_m2"]).to_numpy() * factor * 150.0,
         )
 
         # Same reconstruction check as the plain-cool case, against the

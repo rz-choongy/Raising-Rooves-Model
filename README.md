@@ -440,12 +440,19 @@ Output files:
   hourly current-vs-cool-roof interior heat-flux march (Wh/m², before spin-up
   is discarded and before the annual rollup), long format —
   `building_id`, `time_melbourne`, `roof_construction`, `roof_surface_area_m2`,
-  `flux_base_wh_m2`, `flux_cool_wh_m2`, `energy_saved_cool_wh` (per-building
-  *thermal* energy, `(flux_base − flux_cool) × roof_surface_area_m2` — not
-  electricity, no `cooling_fraction`/COP applied, same as the flux columns).
-  Also with `--coolmax`: `flux_coolmax_wh_m2` and `energy_saved_coolmax_wh`
-  (existing roof vs the Coolmax replacement, same convention). No CSV twin;
-  one suburb-year is millions of rows.
+  `flux_base_wh_m2`, `flux_cool_wh_m2`, `electricity_saved_cool_wh`.
+  `electricity_saved_cool_wh` is electricity-equivalent, not raw roof thermal
+  flux: `(flux_base − flux_cool) × roof_surface_area_m2`, scaled by that
+  hour's `cooling_fraction` (outdoor temp ≥ `CDD_BASE_TEMP`) or
+  `−heating_fraction` (otherwise) and the building's HVAC COP — the same
+  split `annual_benefit` uses, applied per hour instead of to a season sum.
+  Summing it over the year (excluding the spin-up hours Stage 3 itself
+  discards) approximates `net_electricity_saved_kwh_yr`, exact except where
+  a whole season's raw sum would have been clamped at zero (near-neutral
+  roofs; see the in-code comment in `run_model`). Also with `--coolmax`:
+  `flux_coolmax_wh_m2` and `electricity_saved_coolmax_wh` (existing roof vs
+  the Coolmax replacement, same convention). No CSV twin; one suburb-year
+  is millions of rows.
 
 ### Stage 3 Model
 
