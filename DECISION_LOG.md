@@ -4,6 +4,47 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-10-10 — Rooftop PV coverage (f_pv) ported into the Stage 3 engine
+
+Decision: Port the PV block of Maggie's fixed `Final_Heat_Ingress_Model.ipynb`
+(arrived with PR #16) into `stage3_thermal/heat_ingress_model.py`
+as an opt-in suburb-wide `pv_coverage` (`run_stage3 --pv-coverage`, setting
+`HEAT_INGRESS_PV_COVERAGE_FRACTION`, default 0). Outer-skin flux becomes
+`(1 − f_pv)·q_bare + f_pv·q_pv`, where the covered part gets no shortwave,
+natural convection across the panel gap (horizontal EnergyPlus correlation in
+series with half the outer skin's R) and long-wave with the panel underside
+(parallel-plate ε_eff, panel ε 0.90). Panel temperature is Faiman,
+`T_pv = T_air + G/(U0 + U1·v)` with U0 = 25, U1 = 6.84 and v = roof-height
+wind (`HourlyWeather.wind_local_ms`, newly kept).
+
+Why: Seamus noticed the pipeline had no `f_pv` anywhere — the notebook
+gained it on 2026-10-05, but the vectorised engine never modelled PV, and the
+notebook itself was stuck on PR #16 (unmerged until this change landed it
+alongside).
+
+Tradeoffs: Default 0 because Stage 1 has no per-building PV detection, so any
+non-zero value is a uniform assumption across the suburb (the notebook's 0.3
+is a single-house value). Gap conductance is written `h/(1 + h·R/2)` so a zero
+ΔT gives zero flux instead of 1/0. The stability bound is unchanged — the PV
+gap conductance (a few W/m²K) is below the h_ext it replaces on the covered
+fraction. Merged together with PR #16, so the bare-roof terms carry #16's
+outer-skin R/2 series resistance and F_sky/F_ground split, and the whole outer
+boundary now matches the notebook (parity test with f_pv = 0.3). Carlton
+sample (60 buildings, α 0.85, 2007, post-#16 physics): f_pv 0.3 cuts net
+saving from 0.82 to 0.73 kWh/m²/yr (cooling 2.45 → 2.04, heating penalty
+1.63 → 1.31).
+
+Code/docs affected: `config/settings.py` (`HEAT_INGRESS_PV_*`),
+`stage3_thermal/heat_ingress_model.py`, `stage3_thermal/pipeline.py`,
+`stage3_thermal/run_stage3.py`, `tests/test_heat_ingress_model.py`
+(notebook-reference parity with PV), README. New audit column
+`pv_coverage_applied`.
+
+Follow-up: per-building PV detection (Gemini/HSV) to replace the uniform
+fraction.
+
+---
+
 ## 2026-10-10 — Economic analysis tool added; standardised on the sone0002 hourly schema
 
 **Decision:** Added `tools/economic_analysis.py` (Angus's NPV/payback model,
@@ -74,6 +115,90 @@ doing if Queensland suburbs become part of the reported results.
 **Follow-up:** If Brisbane is reported, add a per-suburb timezone; separately,
 re-run Parramatta/West End exports with the current Coolmax-aware tool if Angus
 still needs them. See README Known Limitations #11.
+## 2026-10-05 — Open: two parallel hourly-export implementations, needs consolidation
+
+**Situation:** Two independent solutions to the same need (Angus wanting
+hourly per-building roof flux with area, not just the annual rollup) landed
+at the same time from different directions and were merged together without
+picking a winner:
+
+1. `tools/export_hourly_flux.py` (`hourly_scenario_flux()`) — PR #15, merged
+   to `origin/main` 2026-10-02/05. A standalone script that re-marches
+   selected buildings and writes `flux_existing/coated/coolmax_wh_m2` +
+   `heat_*_kwh` (thermal, pre-COP), plus `hvac_mode`/`spin_up` flag columns.
+2. `run_model(hourly_sink=...)` / `run_stage3 --hourly` (this branch,
+   2026-10-05) — wired into the main Stage 3 run itself: every group's march
+   is captured as it happens (no re-marching), writing
+   `flux_base/cool/coolmax_wh_m2` + `electricity_saved_*_wh` (post-COP,
+   post-cooling_fraction/heating_fraction) to
+   `data/output/stage3_{suburb}_hourly.parquet`.
+
+**Why both were kept:** they merged with no textual conflicts, and dropping
+either unilaterally would throw away either a GitHub-reviewed tool or a
+same-day fix pass with its own test coverage, on a call that's really
+Ryan/Seamus's to make, not an agent's.
+
+**Still open:** pick one, or scope them to genuinely different jobs (e.g.
+`export_hourly_flux` for ad-hoc investigation of a handful of buildings,
+`--hourly` for the full-suburb economics pass) and document the split. If
+merged into one, reconcile the column semantics first — `heat_*_kwh` is
+thermal while `electricity_saved_*_wh` is post-COP, and a careless merge
+could silently mix the two the way the original ad-hoc file that motivated
+PR #15 already did ("Angus ... guessed cool meant Coolmax").
+
+---
+
+## 2026-10-05 — Ported Final_Heat_Ingress_Model.ipynb's fix pass into the Stage 3 engine
+
+**Decision:** A new `Final_Heat_Ingress_Model - FIXED.ipynb` replaced the
+committed single-building reference notebook. Diffing it against the
+2026-09-19 version found two real bugs shared with the vectorised
+`stage3_thermal/heat_ingress_model.py` port, both fixed there the same way:
+
+1. **Outer-skin boundary conduction.** The outer skin coupled to outside air
+   through bare `h_ext·(T_out − T_outer)`, i.e. zero conductive resistance of
+   its own — every other layer face in the march combines its film
+   coefficient with the adjacent layer's half R-value in series, but the
+   outer boundary never did. Fixed to
+   `(T_out − T_outer) / (1/h_ext + R_outer_skin/2)`, and
+   `max_stable_timestep`'s stability bound updated to match (otherwise it
+   would under-estimate the true conductance and over-estimate the safe
+   timestep).
+2. **Outer-skin long-wave view factor.** Radiative loss went 100% to the sky
+   regardless of roof pitch. Fixed to split sky vs ground by
+   `F_sky = 0.5·(1 + cos(tilt))` (`F_ground = 1 − F_sky`), radiating the
+   ground fraction against ambient air as a ground-temperature proxy — a
+   horizontal roof still sees ~100% sky, a pitched one sees measurably more
+   ground.
+
+**Not ported:** the notebook's third change that day — per-house adaptive
+airspace thickness and wind-profile height `Z`, both driven by a
+`roof_plan_area` input (assuming a 2:1 rectangular footprint) — was left out.
+The vectorised engine has no per-building (or even global) plan-area input
+wired into the thermal march today, and adding one overlaps with the
+still-open per-building `pitch_deg` roadmap item (airspace tilt is currently
+one global `HEAT_INGRESS_ROOF_TILT_DEG`, same scoping the notebook itself
+uses). Treating it as separate follow-up rather than folding it in silently.
+
+**Also checked and found already correct in the `.py` port** (i.e. bugs the
+old notebook had that the port never inherited): the airspace↔insulation face
+resistance combination, and a mixed-up `hi`/`hi_cool` ceiling-temperature
+variable in the notebook's single-building scalars (moot once every
+building's march state is independent, as it already is here). The PV-panel
+terms the notebook fix also touched (`G_pv`, `f_pv`, `h_pv_gap`, …) never
+applied — the vectorised engine never modelled PV coverage.
+
+**File cleanup:** `stage3_thermal/heat_ingress_model.ipynb` — already
+superseded as of the 2026-09-19 port and kept only "for history" — deleted
+outright. The old `Final_Heat_Ingress_Model.ipynb` was deleted and the FIXED
+notebook renamed to take its place, keeping the filename every docstring/
+README reference already points to.
+
+**Confirmed test parity:** `tests/test_heat_ingress_model.py`'s scalar
+reference re-implementation (`_notebook_reference_flux`) updated with the
+same two fixes so the production/reference parity test
+(`test_matches_notebook_reference`) stays meaningful. Full suite (174 tests)
+passes.
 
 ---
 
