@@ -23,6 +23,11 @@ pydap>=3.4
 # Data storage
 pyarrow>=14.0
 
+# Economic analysis (tools/economic_analysis.py) — streamed aggregation of
+# large hourly exports, and the formatted Excel workbook output.
+duckdb>=0.10
+xlsxwriter>=3.1
+
 # Stage 3 transient heat-ingress model — optional JIT accelerator for the
 # per-building time-marching loop (~20x). Falls back to vectorised NumPy if absent.
 numba>=0.59

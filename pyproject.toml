@@ -39,6 +39,7 @@ rooves-analyse-coordinate = "tools.analyse_coordinate:main"
 rooves-compare-suburbs = "tools.compare_suburbs:main"
 rooves-visualise = "tools.visualise_results:main"
 rooves-build-footprint-index = "tools.build_footprint_index:main"
+rooves-economic-analysis = "tools.economic_analysis:main"
 
 [tool.pytest.ini_options]
 # Pin test collection to tests/ so `pytest` from the repo root never tries to

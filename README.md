@@ -504,7 +504,8 @@ every building as a complete replacement: the existing roof (its own
 tile/steel/slate construction at its current absorptance) vs a new Colorbond
 Coolmax steel-deck roof (`COOLMAX_*` in `config/settings.py`). Adds the three `*_coolmax`
 columns. No dollar costing is done in the pipeline — pricing per `coating_type`
-/ `roof_type` × `roof_surface_area_m2` is left to the economics model.
+/ `roof_type` × `roof_surface_area_m2` is done by `tools.economic_analysis`
+(see Economic Analysis below).
 
 **Insulation-upgrade scenario (opt-in):** `--insulation-r-upgrade R_M2K_W`
 (optionally paired with `--insulation-thickness-upgrade THICKNESS_M`) marches
@@ -603,6 +604,59 @@ python -m tools.export_hourly_flux --suburb Carlton --sample 5 --min-area 100 --
 
 Writes `data/output/hourly_flux_{suburb}.csv` (`--out x.parquet` also works).
 Capped at 50 buildings (`--max-buildings`) since each is ~8,760 rows.
+
+The time column is `time_melbourne` for every suburb — correct for Melbourne
+and Sydney, but an hour off for Queensland (no daylight saving) from October to
+April. See Known Limitations #11.
+
+### Economic Analysis
+
+Prices every building's cool-roof saving into NPV/payback — the costing step
+the pipeline itself deliberately leaves out (see Stage 3 Outputs above).
+Authored by Angus (economics); see DECISION_LOG 2026-10-10.
+
+Reads an hourly Stage 3 export (`building_id`, `time_melbourne`,
+`roof_construction`, `roof_surface_area_m2`, `flux_base_wh_m2`,
+`flux_cool_wh_m2`, `flux_coolmax_wh_m2`, `electricity_saved_cool_wh`,
+`electricity_saved_coolmax_wh`, optional `electricity_zone`) and prices it
+across four scenarios — the roof-appropriate coating or a Coolmax re-roof,
+winter heating penalty as gas or electricity — at three real discount rates
+(3% / 7% / 10%, Office of Impact Analysis convention), over a 30-year
+analysis period with coating reapplication at warranty end.
+
+```bash
+python -m tools.economic_analysis --input data/output/stage3_carlton_hourly.parquet --zone CitiPower
+python -m tools.economic_analysis --input sydney.parquet --zone Ausgrid
+python -m tools.economic_analysis --batch              # every file in config.settings.ECONOMIC_RUNS
+```
+
+The hourly file carries no location, so the electricity zone (which also
+drives the gas price via its state) must be supplied per file (`--zone`) or
+per building (an `electricity_zone` column, which takes priority) — otherwise
+every building silently falls back to `ECONOMIC_DEFAULT_ZONE`
+(`config/settings.py`, currently CitiPower/Melbourne).
+
+Writes to `data/output/economic_analysis/<input file name>/`:
+`economic_analysis_results.csv` (one row per building per discount rate, led
+by per-building/per-m² figures per the Reporting Basis convention),
+`economic_analysis_summary.csv` (medians and % viable per scenario),
+`economic_analysis_cashflow_example.csv` (year-by-year nominal flows for one
+building), and a formatted `economic_analysis_results.xlsx` workbook with a
+Read-me sheet documenting every assumption live from `config/settings.py`.
+
+All tariffs, gas prices, discount rates, growth rates, and product costs live
+in `config/settings.py` under "Economic Analysis" (`ECONOMIC_*`) — several are
+still `# TODO` placeholders (gas heater efficiency, coating degradation
+literature, Coolmax premium $10 vs $11/m²) pending Angus's sourcing.
+
+**Known schema gap:** `tools.export_hourly_flux` (above) currently writes
+different column names (`flux_existing_wh_m2` / `flux_coated_wh_m2`, no
+`electricity_saved_*_wh`) and is scoped for ad-hoc small samples, not full
+pipeline runs — the `electricity_saved_cool_wh` / `electricity_saved_coolmax_wh`
+columns `tools.economic_analysis` needs are currently produced by the
+unmerged `sone0002/heat-ingress-fix-and-hourly-electricity` branch's
+`run_stage3 --hourly`. See DECISION_LOG 2026-10-10 for the reconciliation this
+still needs.
 
 ### Seasonal Analysis
 
@@ -816,6 +870,17 @@ conclusions.
 10. Some footprint sources map large compounds as one building polygon rather
     than individual roof blocks. Those roofs need a better authoritative source
     or an explicit computer-vision/manual correction workflow.
+11. The transient model's hourly timestamps are always converted to and
+    labelled `time_melbourne` (`Australia/Melbourne`,
+    `stage3_thermal/heat_ingress_model.py`), and `hour_of_day` is derived from
+    that. This is correct for Melbourne (the headline suburb, e.g. Carlton) and
+    coincidentally correct for Sydney/NSW suburbs (e.g. Parramatta), which share
+    Melbourne's clock including daylight saving. It is **wrong for Queensland
+    suburbs** (e.g. West End, Brisbane), which observe no daylight saving — from
+    October to April their hours are shifted up to one hour, mis-aligning both
+    the diurnal physics and any downstream time-of-use pricing. Running a
+    non-AEST/AEDT suburb needs a per-suburb timezone before the results are
+    defensible.
 
 ## Roadmap — What Needs To Change For The Final Model
 
@@ -855,6 +920,13 @@ Ranked by impact on the defensibility of the final FYP numbers.
 8. Give the model a floating indoor dead-band (currently a two-point 18 °C
    heating / 20 °C cooling setpoint switched on outdoor temp, not a real
    thermostat cycle).
+9. Reconcile `tools.export_hourly_flux`'s column names/scope with what
+   `tools.economic_analysis` needs for a full suburb run (see Economic
+   Analysis above and DECISION_LOG 2026-10-10) — currently only the unmerged
+   `sone0002` branch's `run_stage3 --hourly` produces a compatible file.
+10. Resolve the economic assumptions still marked `# TODO` in
+    `config/settings.py` (gas heater efficiency, coating degradation
+    literature, Coolmax install premium) with Angus.
 
 ### Done
 

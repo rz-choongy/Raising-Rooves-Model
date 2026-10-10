@@ -314,3 +314,181 @@ HVAC_COP_COMMERCIAL = 4.0
 TILE_DOWNLOAD_DELAY = 0.1  # seconds between API calls
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0  # exponential backoff multiplier
+
+# ── Economic Analysis (tools/economic_analysis.py) ──────────────────────────
+#
+# Prices every building's cool-roof saving into NPV/payback, from a Stage 3
+# hourly export (building_id, time_melbourne, roof_construction,
+# roof_surface_area_m2, flux_base_wh_m2, flux_cool_wh_m2, flux_coolmax_wh_m2,
+# electricity_saved_cool_wh, electricity_saved_coolmax_wh[, electricity_zone]).
+# Sourced and maintained by Angus (economics); see DECISION_LOG 2026-10-10.
+#
+# MONEY AND TIME CONVENTIONS — read before changing any rate:
+# * The hourly export is ONE indicative year, repeated for every year of the
+#   analysis period, with prices rising each year.
+# * All prices below are TODAY'S prices (2026-27), GST-inclusive.
+# * A price in year t is today's price x (1 + ECONOMIC_INFLATION)^t x
+#   (1 + its real growth rate)^t, so cash flows are NOMINAL dollars.
+# * Discount rates are REAL (Australian Government convention) and converted
+#   to nominal with the Fisher equation: r_nominal = (1+r_real)(1+INFLATION)-1.
+#   Nominal flows at the nominal rate give exactly the same NPV as real flows
+#   at the real rate — INFLATION ALONE DOES NOT CHANGE THE NPV, it cancels.
+
+# Electricity distribution zone -> state, tariff. Zone names must match exactly
+# (a typo stops the run and lists the options). Flat rates and VIC's ToU
+# reconstruction are ESC Victorian Default Offer 2026-27 (verified against the
+# Final Decision Paper cost stack to within 0.01 c/kWh). NSW/QLD/SA are AER
+# Default Market Offer 2026-27, Standard Time of Use (not Solar Saver).
+# Hour windows are (start, end), end exclusive, may wrap midnight, LOCAL clock
+# time matching the export's time_melbourne column.
+_ECONOMIC_VIC_TOU = lambda peak, off, soak: [  # ESC VDO three-period structure
+    ("peak", [(16, 21)], peak),
+    ("solar_soak", [(11, 16)], soak),
+    ("off_peak", [(21, 11)], off),
+]
+
+ECONOMIC_ELECTRICITY_ZONES: dict[str, dict] = {
+    "AusNet": dict(state="VIC", flat=0.3198, verified=True,
+                   tou=_ECONOMIC_VIC_TOU(0.4760, 0.2262, 0.1762)),
+    "CitiPower": dict(state="VIC", flat=0.2596, verified=True,
+                       tou=_ECONOMIC_VIC_TOU(0.3829, 0.2118, 0.1662)),
+    "Jemena": dict(state="VIC", flat=0.2747, verified=True,
+                   tou=_ECONOMIC_VIC_TOU(0.3755, 0.2177, 0.1767)),
+    "Powercor": dict(state="VIC", flat=0.2822, verified=True,
+                      tou=_ECONOMIC_VIC_TOU(0.4164, 0.2250, 0.1728)),
+    "UnitedEnergy": dict(state="VIC", flat=0.2735, verified=True,
+                          tou=_ECONOMIC_VIC_TOU(0.4029, 0.2215, 0.1728)),
+    "Ausgrid": dict(state="NSW", flat=0.3314, verified=True, tou=[
+        ("peak", [(15, 21)], 0.6020),
+        ("off_peak", [(21, 15)], 0.2404)]),
+    "Endeavour": dict(state="NSW", flat=0.3373, verified=True, tou=[
+        ("peak", [(16, 20)], 0.4657),  # listed "46.57 / 47.14*"; footnote unseen
+        ("solar_soak", [(10, 14)], 0.1235),
+        ("off_peak", [(20, 10), (14, 16)], 0.3569)]),
+    "Essential": dict(state="NSW", flat=0.3501, verified=True, tou=[
+        ("peak", [(7, 10), (15, 22)], 0.4212),
+        ("off_peak", [(22, 7), (10, 15)], 0.2415)]),
+    # Energex (SE Qld) rates applied to ALL of Queensland, by decision.
+    "Energex": dict(state="QLD", flat=0.2797, verified=True, tou=[
+        ("peak", [(16, 21)], 0.4779),  # source shows "47.79.56" — typo; 47.79 used
+        ("solar_soak", [(11, 16)], 0.0698),
+        ("off_peak", [(21, 11)], 0.2530)]),
+    "SAPN": dict(state="SA", flat=0.4191, verified=True, tou=[
+        ("peak", [(6, 10), (16, 24)], 0.5622),
+        ("solar_soak", [(10, 16)], 0.1704),  # source shows "17.0431" — typo; 17.04 used
+        ("off_peak", [(0, 6)], 0.3255)]),
+}
+
+# Default zone when a file carries no electricity_zone column and --zone isn't
+# passed. CitiPower = Carlton, the headline suburb.
+ECONOMIC_DEFAULT_ZONE = "CitiPower"
+
+ECONOMIC_TARIFF_STRUCTURE = "tou"  # "tou" or "flat"
+
+# c/MJ, state averages, April 2026. Source: EnergyPlans static gas dataset —
+# indicative, not an AER/ESC reference price. Daily supply charge excluded.
+# TODO: confirm whether GST-inclusive (electricity rates above are).
+ECONOMIC_GAS_RATE_C_PER_MJ: dict[str, float] = {
+    "QLD": 2.45, "VIC": 2.58, "NSW": 2.72, "SA": 3.05,
+}
+
+# Share of the gas's energy that ends up as heat in the house; the rest goes
+# up the flue. Ducted gas heaters are typically 0.60-0.85 (star rating).
+ECONOMIC_GAS_HEATER_EFFICIENCY = 0.80  # TODO: cite a value
+
+# Heating fuel scenarios to run; each produces its own set of columns.
+# "gas": penalty electricity -> heat lost (x HVAC_COP_RESIDENTIAL / COOLING_FRACTION,
+# the same 4.2857 effective COP Angus's audit cross-checked against Stage 3,
+# DECISION_LOG 2026-10-09) -> gas burnt (/ ECONOMIC_GAS_HEATER_EFFICIENCY x 3.6 MJ/kWh).
+# "electric": penalty priced as electricity, exactly as simulated.
+ECONOMIC_HEATING_FUELS = ["gas", "electric"]
+
+ECONOMIC_INFLATION = 0.025  # RBA target band midpoint (2-3%)
+
+# REAL growth per year, i.e. ABOVE inflation. 0.0 = moves with inflation.
+ECONOMIC_REAL_GROWTH_ELECTRICITY = 0.0
+ECONOMIC_REAL_GROWTH_GAS = 0.0
+ECONOMIC_REAL_GROWTH_INSTALL_COST = 0.0  # labour has often outpaced CPI: +0.5-1.5% plausible
+
+# One output row per building per rate. Office of Impact Analysis convention:
+# 7% real central, 3% and 10% sensitivity. 3% real also approximates a
+# homeowner's mortgage-rate opportunity cost (~5.5-6% nominal).
+ECONOMIC_DISCOUNT_RATES_REAL = [0.03, 0.07, 0.10]
+
+# Years the indicative year is projected over. Coatings are reapplied on cycle
+# within it; Coolmax (36-yr life) gets residual credit for its last 6 years.
+ECONOMIC_ANALYSIS_PERIOD_YEARS = 30
+
+# Reapply each coating at the end of its warranty, at the then-current
+# (inflated) cost. If False, one coat only and savings stop at warranty end.
+ECONOMIC_REAPPLY_AT_WARRANTY_END = True
+
+# Credit the unused life of the last application at the end of the period,
+# valued at replacement cost, so an option isn't penalised for a part-cycle.
+ECONOMIC_RESIDUAL_VALUE = False
+
+# Reflectance falls with soiling/weathering. When on, the saving in year k of
+# each application is multiplied by floor + (1-floor) x exp(-(k-1)/tau)
+# (year 1 = 100%); reapplying resets it to 100%.
+ECONOMIC_APPLY_DEGRADATION = False
+
+# install_cost_aud_per_m2: today's cost, GST-incl, applied to roof surface
+# area. Coolmax is the PREMIUM over standard Colorbond for an owner re-roofing
+# anyway.
+ECONOMIC_PRODUCTS: dict[str, dict] = {
+    "endure30c": dict(
+        label="EnduRE30C Gen 5 radiative cooling coating",
+        install_cost_aud_per_m2=35.00,  # applied cost, material + labour
+        warranty_years=8,       # Easyto limited warranty, authorised applicator
+        degradation_floor=0.75,  # warranty covers >30% performance drop
+        degradation_tau=1.5,
+    ),
+    "serisolar": dict(
+        label="Serisolar NEW FAST White",
+        install_cost_aud_per_m2=35.00,  # applied cost, material + labour
+        warranty_years=5,       # slopes > 5%, Serisolar-authorised installer
+        degradation_floor=0.75,  # TODO literature
+        degradation_tau=1.5,
+    ),
+    "coolmax": dict(
+        label="COLORBOND Coolmax premium over standard Colorbond",
+        install_cost_aud_per_m2=11.00,  # premium only  # TODO: $10 or $11?
+        warranty_years=36,      # BlueScope, up to 36 yr corrosion (roofing)
+        degradation_floor=0.90,  # factory-baked finish, slower loss  # TODO
+        degradation_tau=3.0,
+    ),
+}
+
+# Which ECONOMIC_PRODUCTS coating each roof_construction gets (the Stage 3
+# hourly export's 4-value vocabulary: concrete/metal/terracotta/slate — NOT
+# the same grouping as COOL_COATING_BY_STACK above, which names the physics
+# coating families rather than a commercial product).
+ECONOMIC_COATING_FOR_ROOF: dict[str, str] = {
+    "concrete": "endure30c",
+    "metal": "endure30c",
+    "slate": "serisolar",
+    "terracotta": "serisolar",
+}
+
+# name -> (hourly export file, electricity zone), for `--batch`. Each gets its
+# own results subfolder, plus a combined all_areas_summary.csv. The zone also
+# sets the state and so the gas price. IMPORTANT: timestamps must be LOCAL
+# clock time for that area so the time-of-use windows line up (see DECISION_LOG
+# 2026-10-09 — Queensland exports need a per-suburb timezone fix first).
+ECONOMIC_RUNS: dict[str, tuple[str, str]] = {}
+
+# Occupancy adjustment (default off — every hour counted in full).
+# factor(day, hour) = 1 - dial x (1 - profile[day][hour]); dial 0 -> no
+# adjustment, dial 1 -> profile applied in full. Rows: 0=Monday..6=Sunday;
+# columns: hour 0-23. Hours set to 0 overstate the reduction — an empty house
+# still heats up, and the roof still cuts the load on return.
+# TODO: confirm the simulation doesn't already apply a thermostat schedule.
+ECONOMIC_OCCUPANCY_DIAL = 0.0
+_ECONOMIC_AWAY = [0.0 if 8 <= h < 15 else 1.0 for h in range(24)]  # out 8am-3pm
+ECONOMIC_OCCUPANCY_PROFILE = [_ECONOMIC_AWAY] * 5 + [[1.0] * 24] * 2  # Mon-Fri away
+ECONOMIC_OCCUPANCY_APPLIES_TO_COOLING = True
+ECONOMIC_OCCUPANCY_APPLIES_TO_HEATING = True
+
+# Building whose year-by-year cash flows are written to the cashflow-example
+# CSV (None = first building in the file).
+ECONOMIC_EXAMPLE_BUILDING = None
