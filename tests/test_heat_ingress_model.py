@@ -2,7 +2,8 @@
 Tests for stage3_thermal/heat_ingress_model.py — the vectorised transient roof
 heat-ingress engine that replaced the inferred-R_roof thermal_calculator, and
 that itself was ported from Final_Heat_Ingress_Model.ipynb (2026-09-19,
-superseding the earlier heat_ingress_model.ipynb).
+superseding the earlier heat_ingress_model.ipynb; outer-skin series-resistance
+and sky/ground view-factor fixes folded in 2026-10-05).
 
 Covers:
 - Roof stack loading, per-material emissivity, four-way material mapping
@@ -25,8 +26,11 @@ import pandas as pd
 import pytest
 
 from config.settings import (
+    CDD_BASE_TEMP,
     COOL_ROOF_ABSORPTANCE,
     COOL_ROOF_ABSORPTANCE_BY_STACK,
+    COOLING_FRACTION,
+    HEATING_FRACTION,
     HEAT_INGRESS_COOLING_SETPOINT_C,
     HEAT_INGRESS_HEATING_SETPOINT_C,
     HEAT_INGRESS_PV_EMISSIVITY,
@@ -101,6 +105,8 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt, f_p
     thick = stack.thickness_m
     emissivity = stack.emissivity
     cos_tilt = abs(math.cos(math.radians(HEAT_INGRESS_ROOF_TILT_DEG)))
+    f_sky = 0.5 * (1.0 + cos_tilt)
+    f_ground = 1.0 - f_sky
     const = _STEFAN_BOLTZMANN_W_M2K4
     rad_coeff = emissivity * const
     T_heat = HEAT_INGRESS_HEATING_SETPOINT_C + _KELVIN
@@ -140,8 +146,11 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt, f_p
             ) ** 0.25
 
             q_sw_bare = shortwave[ts]
-            q_conv_bare = ho[ts] * (outside[ts] - mid[0])
-            q_lw_bare = rad_coeff * (sky ** 4 - mid[0] ** 4)
+            q_conv_bare = (outside[ts] - mid[0]) / (1.0 / ho[ts] + r0 / 2.0)
+            q_lw_bare = rad_coeff * (
+                f_sky * (sky ** 4 - mid[0] ** 4)
+                + f_ground * (outside[ts] ** 4 - mid[0] ** 4)
+            )
 
             T_pv = outside[ts] + g_pv[ts] / (HEAT_INGRESS_PV_U0_W_M2K + HEAT_INGRESS_PV_U1_W_S_M3K * wind[ts])
             delta_T_pv = T_pv - mid[0]
@@ -549,6 +558,89 @@ class TestRunModel:
         df = pd.DataFrame({"absorptance_before": [0.8], "roof_surface_area_m2": [100.0]})
         out = run_model(df, weather_df, roof_stack=stack)
         assert out["cool_absorptance_applied"].iloc[0] == COOL_ROOF_ABSORPTANCE
+
+    def test_hourly_sink_collects_full_march(self, weather_df, weather, stack):
+        df = pd.DataFrame(
+            {
+                "building_id": ["b0", "b1"],
+                "absorptance_before": [0.85, 0.45],
+                "roof_surface_area_m2": [120.0, 80.0],
+            },
+            index=[10, 11],
+        )
+        sink: list[pd.DataFrame] = []
+        out = run_model(df, weather_df, roof_stack=stack, hourly_sink=sink)
+
+        n_intervals = weather.n_hours - 1
+        hourly = pd.concat(sink, ignore_index=True)
+        assert len(hourly) == n_intervals * len(df)
+        assert set(hourly["building_id"]) == {"b0", "b1"}
+        assert (hourly["roof_construction"] == "_single").all()
+        assert hourly["time_melbourne"].nunique() == n_intervals
+        assert "flux_coolmax_wh_m2" not in hourly.columns  # coolmax=False (default)
+
+        b0 = hourly[hourly["building_id"] == "b0"].sort_values("time_melbourne")
+        assert (b0["roof_surface_area_m2"] == 120.0).all()
+        temp = weather.outdoor_temp_c[: len(b0)]
+        factor = np.where(temp >= CDD_BASE_TEMP, COOLING_FRACTION, -HEATING_FRACTION) / hvac_cop(None)
+        np.testing.assert_allclose(
+            b0["electricity_saved_cool_wh"].to_numpy(),
+            (b0["flux_base_wh_m2"] - b0["flux_cool_wh_m2"]).to_numpy() * factor * 120.0,
+        )
+
+        # The sink is the pre-rollup march; feeding it back through
+        # annual_benefit (same default spin_up_hours run_model itself uses)
+        # should reconstruct the same headline annual figure for each building.
+        reference = annual_benefit(
+            b0["flux_base_wh_m2"].to_numpy().reshape(-1, 1),
+            b0["flux_cool_wh_m2"].to_numpy().reshape(-1, 1),
+            weather, [120.0],
+        )
+        assert reference["net_electricity_saved_kwh_yr"].iloc[0] == pytest.approx(
+            out.loc[10, "net_electricity_saved_kwh_yr"]
+        )
+        # The autumn fixture (May 2007) has a non-trivial heating penalty even
+        # though it has no cooling-season hours, so this isn't a vacuous check.
+        assert out.loc[10, "heating_penalty_electricity_kwh_yr"] != pytest.approx(0.0)
+
+    def test_hourly_sink_with_coolmax_adds_coolmax_columns(self, weather_df, weather, stack):
+        df = pd.DataFrame(
+            {
+                "building_id": ["b0"],
+                "absorptance_before": [0.85],
+                "roof_surface_area_m2": [150.0],
+            },
+            index=[0],
+        )
+        sink: list[pd.DataFrame] = []
+        out = run_model(df, weather_df, roof_stack=stack, coolmax=True, hourly_sink=sink)
+
+        hourly = pd.concat(sink, ignore_index=True).sort_values("time_melbourne")
+        temp = weather.outdoor_temp_c[: len(hourly)]
+        factor = np.where(temp >= CDD_BASE_TEMP, COOLING_FRACTION, -HEATING_FRACTION) / hvac_cop(None)
+        np.testing.assert_allclose(
+            hourly["electricity_saved_coolmax_wh"].to_numpy(),
+            (hourly["flux_base_wh_m2"] - hourly["flux_coolmax_wh_m2"]).to_numpy() * factor * 150.0,
+        )
+
+        # Same reconstruction check as the plain-cool case, against the
+        # *_coolmax annual columns this time.
+        reference = annual_benefit(
+            hourly["flux_base_wh_m2"].to_numpy().reshape(-1, 1),
+            hourly["flux_coolmax_wh_m2"].to_numpy().reshape(-1, 1),
+            weather, [150.0],
+        )
+        assert reference["net_electricity_saved_kwh_yr"].iloc[0] == pytest.approx(
+            out.loc[0, "net_electricity_saved_kwh_yr_coolmax"]
+        )
+
+    def test_hourly_sink_falls_back_to_index_without_building_id(self, weather_df, stack):
+        df = pd.DataFrame(
+            {"absorptance_before": [0.8], "roof_surface_area_m2": [100.0]}, index=[7],
+        )
+        sink: list[pd.DataFrame] = []
+        run_model(df, weather_df, roof_stack=stack, hourly_sink=sink)
+        assert (pd.concat(sink)["building_id"] == 7).all()
 
 
 # ── Insulation-upgrade scenario (opt-in) ─────────────────────────────────────

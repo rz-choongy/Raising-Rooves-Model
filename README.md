@@ -395,6 +395,7 @@ python -m stage3_thermal.run_stage3 --suburb "Carlton" --weather-csv path/to/hou
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --insulation-r-upgrade 4.1  # opt-in insulation-vs-coating comparison
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --coolmax  # opt-in Colorbond Coolmax re-roof scenario
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --pv-coverage 0.3  # assume 30% of every roof under solar panels (f_pv)
+python -m stage3_thermal.run_stage3 --suburb "Carlton" --hourly  # opt-in hourly flux parquet, see Stage 3 Outputs
 ```
 
 Prerequisites:
@@ -437,17 +438,37 @@ Output files:
 
 - `data/output/stage3_{suburb}.parquet`
 - `data/output/stage3_{suburb}.csv`
+- `data/output/stage3_{suburb}_hourly.parquet` — only with `--hourly`: the full
+  hourly current-vs-cool-roof interior heat-flux march (Wh/m², before spin-up
+  is discarded and before the annual rollup), long format —
+  `building_id`, `time_melbourne`, `roof_construction`, `roof_surface_area_m2`,
+  `flux_base_wh_m2`, `flux_cool_wh_m2`, `electricity_saved_cool_wh`.
+  `electricity_saved_cool_wh` is electricity-equivalent, not raw roof thermal
+  flux: `(flux_base − flux_cool) × roof_surface_area_m2`, scaled by that
+  hour's `cooling_fraction` (outdoor temp ≥ `CDD_BASE_TEMP`) or
+  `−heating_fraction` (otherwise) and the building's HVAC COP — the same
+  split `annual_benefit` uses, applied per hour instead of to a season sum.
+  Summing it over the year (excluding the spin-up hours Stage 3 itself
+  discards) approximates `net_electricity_saved_kwh_yr`, exact except where
+  a whole season's raw sum would have been clamped at zero (near-neutral
+  roofs; see the in-code comment in `run_model`). Also with `--coolmax`:
+  `flux_coolmax_wh_m2` and `electricity_saved_coolmax_wh` (existing roof vs
+  the Coolmax replacement, same convention). No CSV twin; one suburb-year
+  is millions of rows.
 
 ### Stage 3 Model
 
 Per building, one forward-Euler finite-volume march (`dt ≈ 40 s`, clamped below
 the airspace-layer stability limit) through four layers, outer to inner. Ported
 2026-09-19 from `Final_Heat_Ingress_Model.ipynb` (superseding the earlier
-`heat_ingress_model.ipynb`); see `DECISION_LOG.md` 2026-09-19. Boundary
-conditions:
+`heat_ingress_model.ipynb`); see `DECISION_LOG.md` 2026-09-19. Two bugs the
+notebook itself fixed on 2026-10-05 were folded into this port the same day —
+see `DECISION_LOG.md` 2026-10-05. Boundary conditions:
 
 ```
-outer:  q = α·(rsdsdir + rsdsdif) + h_ext·(T_out − T_outer) + ε·σ·(T_sky⁴ − T_outer⁴)
+outer:  q = α·(rsdsdir + rsdsdif) + (T_out − T_outer)/(1/h_ext + R_outer/2)
+            + ε·σ·[F_sky·(T_sky⁴ − T_outer⁴) + F_ground·(T_out⁴ − T_outer⁴)]
+F_sky:  0.5·(1 + cos(tilt))      (F_ground = 1 − F_sky; was 100% sky before the 2026-10-05 fix)
 h_ext:  5.7 + 3.8·V_local        (McAdams; V_local = BARRA2 10 m wind brought to roof height)
 T_sky:  Bliss (1961) dew-point + time-of-day clear-sky correlation (BARRA2 humidity)
 airspace faces (outer↔airspace, airspace↔insulation) and inner↔indoor:
@@ -456,6 +477,15 @@ airspace faces (outer↔airspace, airspace↔insulation) and inner↔indoor:
 inner:  q = (T_inner − T_indoor) / (R_inner/2 + 1/h_i)
         T_indoor = 18 °C when T_out < 18 °C (heating setpoint), else 20 °C (cooling setpoint)
 ```
+
+Before the 2026-10-05 fix, the outer boundary coupled to outside air through
+bare `h_ext·(T_out − T_outer)` (no series resistance from the outer skin's own
+R-value, unlike every other layer face) and radiated 100% to the sky. Both
+match `Final_Heat_Ingress_Model.ipynb`'s own fix pass; the notebook's third
+change that same day (per-house adaptive cavity thickness / wind-profile
+height, driven by `roof_plan_area`) was deliberately **not** ported — it needs
+a per-building plan-area input the pipeline doesn't carry yet, and overlaps
+with the per-building `pitch_deg` roadmap item below.
 
 **Four roof constructions are committed**, selected per building from
 `roof_material` (`stack_for_material()`):
@@ -498,7 +528,7 @@ per-m² result × `roof_surface_area_m2`.
 | Cooling / heating fraction | 0.70 / 0.70 | NatHERS 6-star Melbourne basis |
 | HVAC COP | 3.0 residential, 4.0 commercial | GEMS 2019 / AIRAH DA19 |
 | Sky temperature | Bliss (1961) dew-point + time-of-day correlation | Replaces the earlier fixed `T_out − 10 K` assumption |
-| Roof tilt (airspace's outer-facing convection only) | 20° | `HEAT_INGRESS_ROOF_TILT_DEG` — single global value, like the reference notebook; not yet per-building `pitch_deg` |
+| Roof tilt (airspace's outer-facing convection, and the outer skin's sky/ground long-wave view factor) | 20° | `HEAT_INGRESS_ROOF_TILT_DEG` — single global value, like the reference notebook; not yet per-building `pitch_deg` |
 
 **Colorbond Coolmax re-roof scenario (opt-in):** `--coolmax` answers "if the
 owner is re-roofing anyway, how much does a Coolmax roof save?". It runs on
@@ -686,13 +716,19 @@ benefit — net annual effect is near zero.
 
 ### Heat Ingress Model Notebook
 
-`Final_Heat_Ingress_Model.ipynb` (superseding the earlier
-`heat_ingress_model.ipynb`, kept for history) is the standalone transient
-(finite-volume) roof heat-ingress model — hourly heat flux through a layered
-roof for a single building, five committed roof materials, and the reference
-for the physics `stage3_thermal/heat_ingress_model.py` ports (adaptive
-convection, dew-point sky temperature, per-material emissivity; see
-`DECISION_LOG.md` 2026-09-19). It reads its own `Roof_layers.csv` from a
+`Final_Heat_Ingress_Model.ipynb` is the standalone transient (finite-volume)
+roof heat-ingress model — hourly heat flux through a layered roof for a single
+building, five committed roof materials, and the reference for the physics
+`stage3_thermal/heat_ingress_model.py` ports (adaptive convection, dew-point
+sky temperature, per-material emissivity; see `DECISION_LOG.md` 2026-09-19).
+The earlier `heat_ingress_model.ipynb` it originally superseded has now been
+deleted (2026-10-05) — it was already dead weight once the 2026-09-19 port
+landed. The 2026-10-05 revision additionally fixed the outer-boundary series
+resistance and the sky/ground long-wave view factor (both folded into the
+`.py` port the same day; see `DECISION_LOG.md` 2026-10-05) — its third change,
+a per-house adaptive cavity thickness / wind-height driven by `roof_plan_area`,
+was not ported (no per-building plan-area input in the pipeline yet). It
+reads its own `Roof_layers.csv` from a
 shared-drive `Input Tables/` folder (not committed — the pipeline's own
 committed `Input Tables/*.csv` carry the same values, see "Running Stage 3"
 above) plus:

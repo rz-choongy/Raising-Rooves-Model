@@ -29,6 +29,25 @@ Two physics decisions came from the final notebook port:
     as does the inner lining→indoor face — replacing the previous fixed
     cavity-R override and fixed internal-h constant.
 
+Two further corrections came from ``Final_Heat_Ingress_Model.ipynb``'s
+2026-10-05 fix pass (the single-building reference was carrying the same two
+bugs this port had inherited):
+  * The outer-skin boundary now couples to outside air through the correct
+    series resistance ``1 / (1/h_ext + R_outer_skin/2)``, matching how every
+    other layer face in the march is modelled — it previously used bare
+    ``h_ext * (T_air - T_outer_skin)``, implicitly treating the outer skin as
+    having zero conductive resistance of its own.
+  * Outer-skin long-wave loss now splits between sky and ground by a
+    tilt-dependent view factor (``F_sky = 0.5*(1+cos(tilt))``, radiating the
+    remainder to ambient air as a ground-temperature proxy) instead of
+    radiating 100% to the sky — material for a horizontal roof, visible for a
+    pitched one.
+A third notebook change (per-house adaptive cavity thickness / wind-profile
+height, driven by ``roof_plan_area``) was deliberately NOT ported: it needs a
+per-building plan-area input the pipeline doesn't carry yet and overlaps with
+roadmap item #2 (per-building pitch wiring) — tracked as follow-up, not
+folded in silently.
+
 Optional rooftop PV coverage (``f_pv``, ``pv_coverage``; default 0) ports the
 PV block of Maggie's 2026-10-05 notebook: the covered fraction of the outer
 skin gets no shortwave and instead exchanges convection + long-wave with the
@@ -374,9 +393,13 @@ def max_stable_timestep(stack: RoofStack, h_ext_max_w_m2k: float) -> float:
         face_conductance[cav] = 1.0 / (1.0 / h_horizontal_max + r[cav + 1] / 2.0)
 
     inner_conductance = 1.0 / (r[-1] / 2.0 + 1.0 / h_horizontal_max)
+    # Outer skin <-> outside air goes through the skin's own half R-value in
+    # series with the film coefficient, same as every other layer face below
+    # — not bare h_ext (see module docstring, 2026-10-05 fix pass).
+    outer_conductance = 1.0 / (1.0 / h_ext_max_w_m2k + r[0] / 2.0)
     conductance_sum = np.concatenate(
         [
-            [h_ext_max_w_m2k + face_conductance[0]],
+            [outer_conductance + face_conductance[0]],
             face_conductance[:-1] + face_conductance[1:],
             [face_conductance[-1] + inner_conductance],
         ]
@@ -435,6 +458,7 @@ def _march_kernel(
     pv_cov,          # f_pv: fraction of roof under PV panels (0 = no PV)
     pv_eps,          # PV panel underside emissivity
     pv_u0, pv_u1,    # Faiman panel heat-loss coefficients
+    f_sky, f_ground,  # outer-skin long-wave view factors (sky vs ground), sum to 1
     mid_init,        # (4, B)
     out,             # (H-1, B)
 ):
@@ -520,8 +544,11 @@ def _march_kernel(
                 m0_4 = m0 * m0 * m0 * m0
                 q_outer = (
                     a * inc
-                    + hx * (t_out - m0)
-                    + rad_coeff * (sky * sky * sky * sky - m0_4)
+                    + (t_out - m0) / (1.0 / hx + r0 / 2.0)
+                    + rad_coeff * (
+                        f_sky * (sky * sky * sky * sky - m0_4)
+                        + f_ground * (t_out * t_out * t_out * t_out - m0_4)
+                    )
                 )
                 if pv_cov > 0.0:
                     # PV-covered fraction: no direct shortwave; natural
@@ -581,7 +608,7 @@ def _march_numpy(
     temp_k, incident, h_ext, humidity, hour_of_day, wind,
     absorptance, emissivity, r0, r2, r3, cap0, cap1, cap2, cap3,
     dt, substeps, heating_setpoint_k, cooling_setpoint_k,
-    cos_tilt, pv_cov, pv_eps, pv_u0, pv_u1, mid,
+    cos_tilt, pv_cov, pv_eps, pv_u0, pv_u1, f_sky, f_ground, mid,
 ):
     # r2/cap2 may be scalar (shared insulation) or (B,) (per-scenario
     # insulation upgrade) -- numpy broadcasting handles both transparently.
@@ -622,8 +649,11 @@ def _march_numpy(
 
                 q_outer = (
                     absorptance * inc
-                    + hx * (t_out - mid[0])
-                    + rad_coeff * (sky ** 4 - mid[0] ** 4)
+                    + (t_out - mid[0]) / (1.0 / hx + r0 / 2.0)
+                    + rad_coeff * (
+                        f_sky * (sky ** 4 - mid[0] ** 4)
+                        + f_ground * (t_out ** 4 - mid[0] ** 4)
+                    )
                 )
                 if pv_cov > 0.0:
                     t_pv = t_out + inc / (pv_u0 + pv_u1 * wind_arr[s])
@@ -710,7 +740,8 @@ def march_interior_flux(
             value) broadcast to every building -- pass ``stack.emissivity_cool``
             for a cool-roof scenario march.
         roof_tilt_deg: Roof pitch used by the airspace's outer-facing adaptive
-            convection coefficient. Defaults to
+            convection coefficient, and by the outer skin's sky/ground
+            long-wave view factor (``F_sky = 0.5*(1+cos(tilt))``). Defaults to
             ``config.settings.HEAT_INGRESS_ROOF_TILT_DEG``.
         insulation_r_m2k_w / insulation_thickness_m: Scalar or length-``B``
             override for the insulation layer's R-value / thickness. Default
@@ -792,6 +823,10 @@ def march_interior_flux(
     heating_setpoint_k = heating_setpoint_c + _KELVIN
     cooling_setpoint_k = cooling_setpoint_c + _KELVIN
     cos_tilt = abs(math.cos(math.radians(roof_tilt_deg)))
+    # Outer-skin long-wave view factors: sky vs ground, tilt-dependent
+    # (horizontal roof -> all sky; near-vertical -> half-half).
+    f_sky = 0.5 * (1.0 + cos_tilt)
+    f_ground = 1.0 - f_sky
 
     if initial_temps_k is None:
         mid = np.full((n_layers, n_buildings), temp_k[0], dtype=float)
@@ -814,7 +849,7 @@ def march_interior_flux(
             dt, substeps, heating_setpoint_k, cooling_setpoint_k,
             cos_tilt, pv_cov, HEAT_INGRESS_PV_EMISSIVITY,
             HEAT_INGRESS_PV_U0_W_M2K, HEAT_INGRESS_PV_U1_W_S_M3K,
-            np.ascontiguousarray(mid), out,
+            f_sky, f_ground, np.ascontiguousarray(mid), out,
         )
     else:
         out = _march_numpy(
@@ -823,7 +858,8 @@ def march_interior_flux(
             cap[0], cap[1], cap2_arr, cap[3],
             dt, substeps, heating_setpoint_k, cooling_setpoint_k,
             cos_tilt, pv_cov, HEAT_INGRESS_PV_EMISSIVITY,
-            HEAT_INGRESS_PV_U0_W_M2K, HEAT_INGRESS_PV_U1_W_S_M3K, mid,
+            HEAT_INGRESS_PV_U0_W_M2K, HEAT_INGRESS_PV_U1_W_S_M3K,
+            f_sky, f_ground, mid,
         )
 
     if not np.all(np.isfinite(out)):
@@ -1130,6 +1166,8 @@ def run_model(
     insulation_thickness_upgrade_m: float | None = None,
     coolmax: bool = False,
     pv_coverage: float | None = None,
+    building_id_col: str = "building_id",
+    hourly_sink: list[pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """
     End-to-end Stage 3 engine: per-building transient benefit for one suburb.
@@ -1177,6 +1215,30 @@ def run_model(
             panels, applied to all scenarios (see ``march_interior_flux``).
             ``None`` uses ``HEAT_INGRESS_PV_COVERAGE_FRACTION`` (0, no PV).
             Recorded per row as ``pv_coverage_applied``.
+        building_id_col: Column identifying each building, used only to label
+            rows appended to ``hourly_sink`` (falls back to ``df.index`` if
+            absent).
+        hourly_sink: Opt-in -- when a list is passed, every group's full
+            hourly current/cool interior-flux march (before spin-up is
+            discarded and before the annual rollup) is appended to it as a
+            long-format DataFrame: ``building_id``, ``time_melbourne``,
+            ``roof_construction``, ``roof_surface_area_m2``,
+            ``flux_base_wh_m2``, ``flux_cool_wh_m2`` (Wh/m2, positive = heat
+            into the interior), and ``electricity_saved_cool_wh`` --
+            electricity-equivalent, not raw roof thermal flux: ``(flux_base -
+            flux_cool) * roof_surface_area_m2`` scaled by that hour's
+            ``cooling_fraction`` (outdoor temp >= ``CDD_BASE_TEMP``) or
+            ``-heating_fraction`` (otherwise) and the building's HVAC COP --
+            same split ``annual_benefit`` uses, applied per hour instead of
+            to a season sum, so it is an approximation of
+            ``net_electricity_saved_kwh_yr``/yr (exact except where a whole
+            season's raw sum would have been clamped at zero; see the
+            in-loop comment). When ``coolmax=True`` also adds
+            ``flux_coolmax_wh_m2`` and ``electricity_saved_coolmax_wh`` (same
+            convention, existing roof vs the Coolmax replacement). ``None``
+            (default) skips this -- it roughly doubles memory use since
+            nothing here is sized for a whole suburb's hourly series
+            otherwise.
 
     Every result carries ``roof_type`` (concrete / metal_light / metal_dark /
     slate / terracotta) and ``coating_type`` (which cool coating was applied,
@@ -1277,6 +1339,7 @@ def run_model(
             pv_coverage=pv_cov,
         )
         cols = {name: flux[:, i * n:(i + 1) * n] for i, name in enumerate(scenarios)}
+
         group_result = annual_benefit(cols["current"], cols["cool"], weather, area, building_type)
         if "insulation" in cols:
             insulation_result = annual_benefit_insulation(
@@ -1290,6 +1353,7 @@ def run_model(
         group_result.insert(3, "pv_coverage_applied", pv_cov)
         group_result.index = df.index[mask]
         results.append(group_result)
+        flux_coolmax = None
         if coolmax:
             if reroof_in_group:
                 flux_coolmax = cols["coolmax"]
@@ -1307,6 +1371,63 @@ def run_model(
                 _coolmax_columns(cols["current"], flux_coolmax, weather, area,
                                  building_type, df.index[mask])
             )
+
+        if hourly_sink is not None:
+            base, cool = cols["current"], cols["cool"]
+            n_intervals = base.shape[0]
+            group_index = df.index[mask]
+            ids = (
+                df.loc[group_index, building_id_col].to_numpy()
+                if building_id_col in df.columns
+                else group_index.to_numpy()
+            )
+            # Building-major flattening (every building's full hourly run,
+            # then the next building) -- matches np.repeat(ids, n_intervals).
+            area_flat = np.repeat(area, n_intervals)
+
+            # Same cooling/heating split and COP annual_benefit uses, applied
+            # per hour instead of to a season sum -- lets each row carry a
+            # signed electricity-equivalent contribution (+ve saves, -ve
+            # costs) rather than raw roof thermal flux. cop_group is scalar
+            # per building (building_type doesn't vary hour to hour), so the
+            # per-hour mode (temp >= CDD_BASE_TEMP) is the only thing that
+            # varies down the rows.
+            interval_temp_c = weather.outdoor_temp_c[:n_intervals]
+            cooling_hour = (interval_temp_c >= CDD_BASE_TEMP)[:, None]  # (n_intervals, 1)
+            cop_group = np.array([hvac_cop(b) for b in building_type], dtype=float)  # (n,)
+            mode_factor = (
+                np.where(cooling_hour, COOLING_FRACTION, -HEATING_FRACTION)
+                / cop_group[None, :]
+            )  # (n_intervals, n); heating hours negate the sign (see below)
+
+            def _electricity_wh(delta_wh_m2: np.ndarray) -> np.ndarray:
+                return (delta_wh_m2 * mode_factor * area[None, :]).T.reshape(-1)
+
+            hourly_cols = {
+                "building_id": np.repeat(ids, n_intervals),
+                "time_melbourne": np.tile(weather.time_melbourne[:n_intervals], n),
+                "roof_construction": key,
+                "roof_surface_area_m2": area_flat,
+                "flux_base_wh_m2": base.T.reshape(-1),
+                "flux_cool_wh_m2": cool.T.reshape(-1),
+                # Per-building electricity-equivalent saved this hour by the
+                # cool-roof coating: +ve in a cooling hour (temp >= CDD_BASE_TEMP)
+                # means less cooling electricity used; -ve in a heating hour
+                # means the coating rejected wanted solar warmth, costing
+                # heating electricity. Summing this column over the year
+                # (excluding the spin-up hours run_model itself discards) is
+                # approximately, not exactly, net_electricity_saved_kwh_yr --
+                # annual_benefit clamps each *season's* sum at >=0 before
+                # applying cooling_fraction/heating_fraction/COP, whereas this
+                # is the unclamped per-hour contribution; they only diverge
+                # for a roof close enough to its own cool-coating target that
+                # one season's raw sum goes slightly negative.
+                "electricity_saved_cool_wh": _electricity_wh(base - cool),
+            }
+            if flux_coolmax is not None:
+                hourly_cols["flux_coolmax_wh_m2"] = flux_coolmax.T.reshape(-1)
+                hourly_cols["electricity_saved_coolmax_wh"] = _electricity_wh(base - flux_coolmax)
+            hourly_sink.append(pd.DataFrame(hourly_cols))
 
     result = pd.concat(results).loc[df.index]
     if coolmax:
