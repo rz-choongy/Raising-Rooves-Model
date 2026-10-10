@@ -83,6 +83,17 @@ standardise on (see README Roadmap #9/#10); if so, retire or re-scope
 `--hourly` flag so a full suburb export is reproducible from this branch
 without an external file.
 
+**Resolved 2026-10-10 (PR #18):** PR #18 ("rooftop PV coverage + land PR #16
+notebook fixes", entry above) merged PR #16 — i.e. the
+`sone0002/heat-ingress-fix-and-hourly-electricity` branch referenced above —
+into `main`. `run_stage3 --hourly --coolmax` now writes
+`data/output/stage3_{suburb}_hourly.parquet` with exactly the schema
+`tools.economic_analysis` expects, in-repo, no external file needed. The
+open question above is answered: yes, standardise on this schema.
+`tools.export_hourly_flux` was left as-is (still a separate, narrower
+ad-hoc-sample tool) — nothing further to reconcile there, since it was never
+meant to feed `tools.economic_analysis`.
+
 ---
 
 ## 2026-10-09 — Hourly timestamps are Melbourne-only (logged, not fixed)

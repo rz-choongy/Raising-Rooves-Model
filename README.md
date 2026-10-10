@@ -690,14 +690,15 @@ in `config/settings.py` under "Economic Analysis" (`ECONOMIC_*`) — several are
 still `# TODO` placeholders (gas heater efficiency, coating degradation
 literature, Coolmax premium $10 vs $11/m²) pending Angus's sourcing.
 
-**Known schema gap:** `tools.export_hourly_flux` (above) currently writes
-different column names (`flux_existing_wh_m2` / `flux_coated_wh_m2`, no
-`electricity_saved_*_wh`) and is scoped for ad-hoc small samples, not full
-pipeline runs — the `electricity_saved_cool_wh` / `electricity_saved_coolmax_wh`
-columns `tools.economic_analysis` needs are currently produced by the
-unmerged `sone0002/heat-ingress-fix-and-hourly-electricity` branch's
-`run_stage3 --hourly`. See DECISION_LOG 2026-10-10 for the reconciliation this
-still needs.
+**Input source:** `python -m stage3_thermal.run_stage3 --suburb <name> --hourly --coolmax`
+writes `data/output/stage3_{suburb}_hourly.parquet` with exactly the columns
+above (see Stage 3 Outputs). `tools.export_hourly_flux` (above) is a separate,
+narrower tool — different column names (`flux_existing_wh_m2` /
+`flux_coated_wh_m2`, no `electricity_saved_*_wh`), scoped for ad-hoc small
+samples rather than full suburb runs — and is not an input to
+`tools.economic_analysis`. (Resolved 2026-10-10: PR #18 merged the
+`sone0002/heat-ingress-fix-and-hourly-electricity` branch that originally
+produced this schema; see DECISION_LOG.)
 
 ### Seasonal Analysis
 
@@ -967,13 +968,9 @@ Ranked by impact on the defensibility of the final FYP numbers.
 8. Give the model a floating indoor dead-band (currently a two-point 18 °C
    heating / 20 °C cooling setpoint switched on outdoor temp, not a real
    thermostat cycle).
-9. Reconcile `tools.export_hourly_flux`'s column names/scope with what
-   `tools.economic_analysis` needs for a full suburb run (see Economic
-   Analysis above and DECISION_LOG 2026-10-10) — currently only the unmerged
-   `sone0002` branch's `run_stage3 --hourly` produces a compatible file.
-10. Resolve the economic assumptions still marked `# TODO` in
-    `config/settings.py` (gas heater efficiency, coating degradation
-    literature, Coolmax install premium) with Angus.
+9. Resolve the economic assumptions still marked `# TODO` in
+   `config/settings.py` (gas heater efficiency, coating degradation
+   literature, Coolmax install premium) with Angus.
 
 ### Done
 
