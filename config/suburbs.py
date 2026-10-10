@@ -236,6 +236,17 @@ SUBURBS = {
         bbox=(-35.2801, 149.1257, -35.2641, 149.1457),
         zone_type="mixed",
     ),
+    # ── Interstate comparison suburbs (added 2026-10-10) ─────────────────────
+    # NOTE: hourly Stage 3 timestamps are hardcoded to Australia/Melbourne (see
+    # DECISION_LOG 2026-10-09 / README Known Limitation #11). Annual totals are
+    # unaffected; only the hourly timestamp labels shift for non-AEST/AEDT zones.
+    "shelly_beach": Suburb(
+        name="Shelly Beach",
+        sa2_code="",  # ABS SA2 TBC (Shelly Beach, Caloundra, Sunshine Coast QLD)
+        centroid=(-26.8030, 153.1430),
+        bbox=(-26.8110, 153.1330, -26.7950, 153.1530),
+        zone_type="residential",  # QLD no DST -- hourly timestamps off 1 h Oct-Apr
+    ),
 }
 
 
