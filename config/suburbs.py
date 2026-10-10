@@ -247,6 +247,37 @@ SUBURBS = {
         bbox=(-26.8110, 153.1330, -26.7950, 153.1530),
         zone_type="residential",  # QLD no DST -- hourly timestamps off 1 h Oct-Apr
     ),
+    # ── Climate-contrast suburbs for the 2007-vs-2019 energy comparison (added 2026-10-10) ──
+    # Hourly Stage 3 timestamps are hardcoded to Australia/Melbourne; annual kWh/CO2 totals
+    # are unaffected, only hourly timestamp labels (and therefore TOU $ timing) shift off-AEST.
+    "bondi": Suburb(
+        name="Bondi",
+        sa2_code="",  # ABS SA2 TBC (Bondi, Waverley LGA, eastern Sydney NSW)
+        centroid=(-33.8915, 151.2767),
+        bbox=(-33.9000, 151.2680, -33.8830, 151.2850),
+        zone_type="residential",  # NSW (AEST/AEDT) -- economic zone Ausgrid
+    ),
+    "alice_springs": Suburb(
+        name="Alice Springs",
+        sa2_code="",  # ABS SA2 TBC (Alice Springs, NT) -- arid-zone climate contrast
+        centroid=(-23.6980, 133.8807),
+        bbox=(-23.7080, 133.8700, -23.6880, 133.8920),
+        zone_type="residential",  # NT no DST (+0:30 vs AEST) -- NO economic tariff zone; energy/CO2 only
+    ),
+    "marion": Suburb(
+        name="Marion",
+        sa2_code="",  # ABS SA2 TBC (Marion, City of Marion, southern Adelaide SA)
+        centroid=(-35.0100, 138.5570),
+        bbox=(-35.0180, 138.5470, -35.0020, 138.5670),
+        zone_type="residential",  # SA (ACST +0:30 vs AEST) -- economic zone SAPN
+    ),
+    "broome": Suburb(
+        name="Broome",
+        sa2_code="",  # ABS SA2 TBC (Broome, WA) -- tropical monsoonal climate contrast
+        centroid=(-17.9614, 122.2359),
+        bbox=(-17.9700, 122.2260, -17.9520, 122.2460),
+        zone_type="mixed",  # WA AWST (-2:00 vs AEST, no DST) -- NO economic tariff zone; energy/CO2 only
+    ),
 }
 
 
