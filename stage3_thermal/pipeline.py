@@ -145,6 +145,7 @@ def run_stage3(
     insulation_r_upgrade_m2k_w: float | None = None,
     insulation_thickness_upgrade_m: float | None = None,
     coolmax: bool = False,
+    pv_coverage: float | None = None,
 ) -> pd.DataFrame:
     """
     Run the full Stage 3 heat-ingress pipeline for a suburb.
@@ -164,6 +165,9 @@ def run_stage3(
             thickness).
         coolmax: Opt-in Colorbond Coolmax re-roof scenario (see
             ``heat_ingress_model.run_model``). Adds ``*_coolmax`` columns.
+        pv_coverage: Suburb-wide rooftop PV coverage fraction ``f_pv`` (see
+            ``heat_ingress_model.run_model``). ``None`` uses
+            ``HEAT_INGRESS_PV_COVERAGE_FRACTION`` (0, no PV).
 
     Returns:
         DataFrame with all Stage 2 columns plus the Stage 3 thermal columns.
@@ -195,6 +199,7 @@ def run_stage3(
         insulation_r_upgrade_m2k_w=insulation_r_upgrade_m2k_w,
         insulation_thickness_upgrade_m=insulation_thickness_upgrade_m,
         coolmax=coolmax,
+        pv_coverage=pv_coverage,
     )
     df = pd.concat([df.reset_index(drop=True), thermal_df.reset_index(drop=True)], axis=1)
 

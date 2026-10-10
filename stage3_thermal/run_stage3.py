@@ -95,6 +95,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--pv-coverage",
+        type=float,
+        default=None,
+        metavar="F_PV",
+        help=(
+            "Fraction (0-1) of every roof assumed under rooftop solar panels "
+            "(f_pv, Final_Heat_Ingress_Model.ipynb uses 0.3). Applied to all "
+            "scenarios; default 0 (no PV). Recorded as pv_coverage_applied."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug-level logging",
@@ -128,6 +139,7 @@ def main() -> None:
             insulation_r_upgrade_m2k_w=args.insulation_r_upgrade,
             insulation_thickness_upgrade_m=args.insulation_thickness_upgrade,
             coolmax=args.coolmax,
+            pv_coverage=args.pv_coverage,
         )
         if df.empty:
             logger.warning("No results produced. Check logs for details.")

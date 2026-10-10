@@ -29,6 +29,9 @@ from config.settings import (
     COOL_ROOF_ABSORPTANCE_BY_STACK,
     HEAT_INGRESS_COOLING_SETPOINT_C,
     HEAT_INGRESS_HEATING_SETPOINT_C,
+    HEAT_INGRESS_PV_EMISSIVITY,
+    HEAT_INGRESS_PV_U0_W_M2K,
+    HEAT_INGRESS_PV_U1_W_S_M3K,
     HEAT_INGRESS_ROOF_EMISSIVITY,
     HEAT_INGRESS_ROOF_TILT_DEG,
     HVAC_COP_COMMERCIAL,
@@ -86,8 +89,12 @@ def stack():
 
 
 # ── Faithful scalar reference (Final_Heat_Ingress_Model.ipynb transient cell) ─
-def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
-    """One-building transient march, transcribed from the final notebook."""
+def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt, f_pv=0.0):
+    """One-building transient march, transcribed from the final notebook.
+
+    ``f_pv`` follows the notebook's PV block (Faiman panel temperature, gap
+    convection + panel long-wave on the covered fraction, no shortwave there).
+    """
     r0, r2, r3 = stack.r_value_m2k_w[0], stack.r_value_m2k_w[2], stack.r_value_m2k_w[3]
     density = stack.density_kg_m3
     Cp = stack.heat_capacity_j_kgk
@@ -105,6 +112,9 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
     h_ext = weather.h_ext_w_m2k
     humidity = weather.humidity_percent
     hour_of_day = weather.hour_of_day
+    G_pv = weather.shortwave_incident_w_m2
+    V_z = weather.wind_local_ms
+    eps_eff = 1 / (1 / HEAT_INGRESS_PV_EMISSIVITY + 1 / emissivity - 1)
 
     mid = np.full(4, temp_k[0], dtype=float)
     out = np.zeros(weather.n_hours - 1)
@@ -113,6 +123,8 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
         shortwave = np.linspace(q_sw_hourly[hour], q_sw_hourly[hour + 1], tph)
         ho = np.linspace(h_ext[hour], h_ext[hour + 1], tph)
         rh = np.linspace(humidity[hour], humidity[hour + 1], tph)
+        g_pv = np.linspace(G_pv[hour], G_pv[hour + 1], tph)
+        wind = np.linspace(V_z[hour], V_z[hour + 1], tph)
         t_day0 = hour_of_day[hour]
         acc = 0.0
         for ts in range(tph):
@@ -127,11 +139,24 @@ def _notebook_reference_flux(weather: HourlyWeather, stack, absorptance, dt):
                 + 0.013 * math.cos(math.radians(15.0 * t_local))
             ) ** 0.25
 
+            q_sw_bare = shortwave[ts]
+            q_conv_bare = ho[ts] * (outside[ts] - mid[0])
+            q_lw_bare = rad_coeff * (sky ** 4 - mid[0] ** 4)
+
+            T_pv = outside[ts] + g_pv[ts] / (HEAT_INGRESS_PV_U0_W_M2K + HEAT_INGRESS_PV_U1_W_S_M3K * wind[ts])
+            delta_T_pv = T_pv - mid[0]
+            if delta_T_pv >= 0:
+                h_pv_gap = 1.81 * abs(delta_T_pv) ** (1 / 3) / 2.382
+            else:
+                h_pv_gap = 9.482 * abs(delta_T_pv) ** (1 / 3) / 6.238
+            q_conv_pv = delta_T_pv / (1 / h_pv_gap + r0 / 2) if h_pv_gap > 0 else 0.0
+            q_lw_pv = eps_eff * const * (T_pv ** 4 - mid[0] ** 4)
+
             q = np.zeros(5)
             q[0] = (
-                shortwave[ts]
-                + ho[ts] * (outside[ts] - mid[0])
-                + rad_coeff * (sky ** 4 - mid[0] ** 4)
+                (1 - f_pv) * q_sw_bare
+                + (1 - f_pv) * q_conv_bare + f_pv * q_conv_pv
+                + (1 - f_pv) * q_lw_bare + f_pv * q_lw_pv
             )
 
             delta_a = mid[0] - mid[1]
@@ -291,6 +316,42 @@ class TestMarch:
         ref = _notebook_reference_flux(weather, stack, 0.8, dt)
         np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
 
+    def test_matches_notebook_reference_with_pv(self, weather, stack):
+        dt = 40.0
+        got = march_interior_flux(weather, stack, 0.8, dt_s=dt, pv_coverage=0.3)[:, 0]
+        ref = _notebook_reference_flux(weather, stack, 0.8, dt, f_pv=0.3)
+        np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+
+    def test_pv_paths_agree(self, weather, stack, monkeypatch):
+        absorptances = np.array([0.35, 0.9])
+        reference = march_interior_flux(weather, stack, absorptances, dt_s=40.0, pv_coverage=0.5)
+        monkeypatch.setattr(him, "_HAS_NUMBA", False)
+        fallback = march_interior_flux(weather, stack, absorptances, dt_s=40.0, pv_coverage=0.5)
+        np.testing.assert_allclose(fallback, reference, rtol=1e-6, atol=1e-6)
+
+    def test_zero_pv_coverage_is_the_pre_pv_model(self, weather, stack):
+        default = march_interior_flux(weather, stack, 0.8, dt_s=40.0)
+        explicit = march_interior_flux(weather, stack, 0.8, dt_s=40.0, pv_coverage=0.0)
+        np.testing.assert_array_equal(default, explicit)
+
+    def test_full_pv_coverage_removes_absorptance_effect(self, weather, stack):
+        # Fully shaded roof gets no shortwave, so the coating's absorptance
+        # can no longer matter.
+        flux = march_interior_flux(weather, stack, np.array([0.3, 0.9]), dt_s=40.0, pv_coverage=1.0)
+        np.testing.assert_allclose(flux[:, 0], flux[:, 1], rtol=1e-12, atol=1e-12)
+
+    def test_pv_shading_shrinks_cool_roof_benefit(self, weather, stack):
+        def benefit(f_pv):
+            flux = march_interior_flux(
+                weather, stack, np.array([0.85, COOL_ROOF_ABSORPTANCE]), dt_s=40.0, pv_coverage=f_pv
+            )
+            return (flux[:, 0] - flux[:, 1]).sum()
+        assert benefit(0.3) < benefit(0.0)
+
+    def test_rejects_out_of_range_pv_coverage(self, weather, stack):
+        with pytest.raises(ValueError):
+            march_interior_flux(weather, stack, 0.8, dt_s=40.0, pv_coverage=1.5)
+
     def test_numba_and_numpy_paths_agree(self, weather, stack, monkeypatch):
         absorptances = np.array([0.35, 0.7, 0.9])
         reference = march_interior_flux(weather, stack, absorptances, dt_s=40.0)
@@ -411,6 +472,7 @@ class TestRunModel:
         assert list(out.index) == [10, 11, 12]
         assert list(out.columns) == [*_AUDIT_COLUMNS, *_OUTPUT_COLUMNS]
         assert (out["roof_construction"] == "_single").all()
+        assert (out["pv_coverage_applied"] == 0.0).all()
         # NaN absorptance handled (conservative dark roof) → finite output.
         assert np.isfinite(out["electricity_saved_kwh_yr"].to_numpy()).all()
 

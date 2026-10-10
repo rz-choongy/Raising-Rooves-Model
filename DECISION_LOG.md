@@ -4,6 +4,45 @@ Each entry records a method or source choice, why it was made, and what was reje
 
 ---
 
+## 2026-10-10 — Rooftop PV coverage (f_pv) ported into the Stage 3 engine
+
+Decision: Port the PV block of Maggie's fixed `Final_Heat_Ingress_Model.ipynb`
+(on PR #16's branch, not yet on main) into `stage3_thermal/heat_ingress_model.py`
+as an opt-in suburb-wide `pv_coverage` (`run_stage3 --pv-coverage`, setting
+`HEAT_INGRESS_PV_COVERAGE_FRACTION`, default 0). Outer-skin flux becomes
+`(1 − f_pv)·q_bare + f_pv·q_pv`, where the covered part gets no shortwave,
+natural convection across the panel gap (horizontal EnergyPlus correlation in
+series with half the outer skin's R) and long-wave with the panel underside
+(parallel-plate ε_eff, panel ε 0.90). Panel temperature is Faiman,
+`T_pv = T_air + G/(U0 + U1·v)` with U0 = 25, U1 = 6.84 and v = roof-height
+wind (`HourlyWeather.wind_local_ms`, newly kept).
+
+Why: Seamus noticed the pipeline had no `f_pv` anywhere — the notebook
+gained it on 2026-10-05, but the vectorised engine never modelled PV, and the
+notebook itself only reached PR #16 (unmerged).
+
+Tradeoffs: Default 0 because Stage 1 has no per-building PV detection, so any
+non-zero value is a uniform assumption across the suburb (the notebook's 0.3
+is a single-house value). Gap conductance is written `h/(1 + h·R/2)` so a zero
+ΔT gives zero flux instead of 1/0. The stability bound is unchanged — the PV
+gap conductance (a few W/m²K) is below the h_ext it replaces on the covered
+fraction. The bare-roof terms are main's (PR #16's outer-skin R/2 and
+F_sky/F_ground fixes are not on main yet); when #16 merges, the PV term
+needs no change. Carlton sample (60 buildings, α 0.85, 2007): f_pv 0.3
+cuts net saving from 0.81 to 0.72 kWh/m²/yr (cooling 2.43 → 2.03, heating
+penalty 1.62 → 1.30).
+
+Code/docs affected: `config/settings.py` (`HEAT_INGRESS_PV_*`),
+`stage3_thermal/heat_ingress_model.py`, `stage3_thermal/pipeline.py`,
+`stage3_thermal/run_stage3.py`, `tests/test_heat_ingress_model.py`
+(notebook-reference parity with PV), README. New audit column
+`pv_coverage_applied`.
+
+Follow-up: per-building PV detection (Gemini/HSV) to replace the uniform
+fraction; merge PR #16 so the notebook in main carries `f_pv` too.
+
+---
+
 ## 2026-10-10 — Economic analysis tool added; standardised on the sone0002 hourly schema
 
 **Decision:** Added `tools/economic_analysis.py` (Angus's NPV/payback model,

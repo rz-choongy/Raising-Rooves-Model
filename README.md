@@ -394,6 +394,7 @@ python -m stage3_thermal.run_stage3 --suburb "Carlton" --year 2007 --debug
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --weather-csv path/to/hourly.csv
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --insulation-r-upgrade 4.1  # opt-in insulation-vs-coating comparison
 python -m stage3_thermal.run_stage3 --suburb "Carlton" --coolmax  # opt-in Colorbond Coolmax re-roof scenario
+python -m stage3_thermal.run_stage3 --suburb "Carlton" --pv-coverage 0.3  # assume 30% of every roof under solar panels (f_pv)
 ```
 
 Prerequisites:
@@ -419,6 +420,7 @@ Stage 3 appends these columns to the Stage 2 table:
 | `roof_type` | Pricing roof type: `concrete` / `metal_light` / `metal_dark` / `slate` / `terracotta`. Metal-construction roofs without an explicit light/dark label are split at absorptance 0.55 |
 | `coating_type` | Cool coating applied: `metal_roof_coating` / `concrete_tile_coating` / `terracotta_slate_coating` |
 | `cool_absorptance_applied` / `cool_emissivity_applied` | Audit — the coated absorptance and emissivity this building was marched at |
+| `pv_coverage_applied` | Audit — rooftop PV coverage fraction `f_pv` assumed for this building (0 unless `--pv-coverage` is passed) |
 | `roof_flux_mode_mismatch_hours` | Hours where the current and cool roofs' heat flow point opposite ways (one heating the room, one cooling it) — Maggie's notebook "discrepancy" flag |
 | `electricity_saved_kwh_yr_fluxsign` / `heating_penalty_electricity_kwh_yr_fluxsign` / `net_electricity_saved_kwh_yr_fluxsign` | Sensitivity: the same saving counted the `Final_Heat_Ingress_Model.ipynb` way — mode from the sign of the roof heat flow, mismatch hours dropped. Roof-only view, so a lower bound; the headline columns use the outdoor-temperature split |
 | `cooling_electricity_saved_kwh_yr_coolmax` / `heating_penalty_electricity_kwh_yr_coolmax` / `net_electricity_saved_kwh_yr_coolmax` | Only with `--coolmax`: electricity effect of re-roofing in Colorbond Coolmax (SR 0.77, α 0.23, ε 0.85) as a complete replacement of the existing roof (existing tile/steel/slate at its current colour − new Coolmax steel deck) |
@@ -506,6 +508,15 @@ Coolmax steel-deck roof (`COOLMAX_*` in `config/settings.py`). Adds the three `*
 columns. No dollar costing is done in the pipeline — pricing per `coating_type`
 / `roof_type` × `roof_surface_area_m2` is done by `tools.economic_analysis`
 (see Economic Analysis below).
+
+**Rooftop PV coverage (opt-in):** `--pv-coverage F_PV` ports `f_pv` from
+Maggie's fixed `Final_Heat_Ingress_Model.ipynb`: that fraction of every roof
+sits under solar panels, so it gets no direct sunlight and instead exchanges
+heat with the panel underside (convection across the air gap plus long-wave;
+panel temperature from the Faiman model). It applies to every scenario, so a
+cool coating only reaches the uncovered `1 − f_pv`. Default is 0 (no PV)
+because Stage 1 doesn't detect panels per building — this is a suburb-wide
+assumption. Constants are `HEAT_INGRESS_PV_*` in `config/settings.py`.
 
 **Insulation-upgrade scenario (opt-in):** `--insulation-r-upgrade R_M2K_W`
 (optionally paired with `--insulation-thickness-upgrade THICKNESS_M`) marches

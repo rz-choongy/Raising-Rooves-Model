@@ -245,6 +245,21 @@ HEAT_INGRESS_ROOF_HEIGHT_M = 6.0
 # should come from Table 2") — this mirrors that scoping rather than exceeding it.
 HEAT_INGRESS_ROOF_TILT_DEG = 20.0
 
+# Rooftop PV coverage (f_pv) — fraction of roof area under solar panels, ported
+# from Maggie's fixed Final_Heat_Ingress_Model.ipynb (2026-10-05). The covered
+# fraction gets no direct shortwave; instead it exchanges convection across the
+# panel→roof air gap and long-wave with the panel underside (panel temperature
+# from the Faiman model, T_pv = T_air + G/(U0 + U1*v)). Applies to every
+# scenario (current, cool coating, insulation, Coolmax) — the coating only
+# reaches the uncovered (1 - f_pv) of the roof. The notebook uses 0.3; the
+# pipeline default is 0.0 (no PV) because Stage 1 has no per-building PV
+# detection, so suburb-wide coverage is an opt-in assumption
+# (`run_stage3 --pv-coverage`).
+HEAT_INGRESS_PV_COVERAGE_FRACTION = 0.0
+HEAT_INGRESS_PV_EMISSIVITY = 0.90       # panel underside long-wave emissivity
+HEAT_INGRESS_PV_U0_W_M2K = 25.0         # Faiman constant heat-loss coefficient
+HEAT_INGRESS_PV_U1_W_S_M3K = 6.84       # Faiman wind-dependent heat-loss coefficient
+
 # Nominal forward-Euler solver timestep (s). Clamped down at run time if the
 # stability limit over the actual weather series is tighter (cavity-layer bound).
 HEAT_INGRESS_SOLVER_DT_S = 40
