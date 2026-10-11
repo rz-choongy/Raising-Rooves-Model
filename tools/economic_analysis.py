@@ -225,15 +225,27 @@ def _hour_rates(zone: str) -> np.ndarray:
     return rates
 
 
+_WARNED_NO_GAS_STATES: set[str] = set()
+
+
 def _gas_dollars_per_heat_kwh(state: str) -> float:
     """$ per kWh of SIMULATED heating electricity, if that heat came from gas.
 
         elec kWh x COP           = heat delivered (kWh)
         heat / efficiency x 3.6  = MJ of gas burnt
         MJ x c/MJ / 100          = dollars
+
+    NaN for states with no reticulated mains gas network (WA, NT) rather than
+    a fabricated rate — the gas-heating scenario genuinely doesn't exist
+    there, it isn't a missing-data gap.
     """
     if state not in cfg.ECONOMIC_GAS_RATE_C_PER_MJ:
-        _fail(f"No gas rate for state {state!r}. Options: {sorted(cfg.ECONOMIC_GAS_RATE_C_PER_MJ)}")
+        if state not in _WARNED_NO_GAS_STATES:
+            logger.warning(
+                "No reticulated gas network modelled for state %r — "
+                "*_heat_gas_aud will be NaN for these buildings.", state)
+            _WARNED_NO_GAS_STATES.add(state)
+        return float("nan")
     mj = SIMULATION_COP / cfg.ECONOMIC_GAS_HEATER_EFFICIENCY * MJ_PER_KWH
     return mj * cfg.ECONOMIC_GAS_RATE_C_PER_MJ[state] / 100.0
 
@@ -274,6 +286,16 @@ def price(agg: pd.DataFrame) -> pd.DataFrame:
     if len(bad):
         logger.warning("%d buildings have more than one roof area; using the max.", len(bad))
     b["area"] = b["area_max"]
+
+    # pandas' default sum() treats an all-NaN group as 0, not NaN, so an
+    # hour-by-hour NaN gas rate would silently become a free $0 heating bill
+    # after the groupby above. Re-null the gas columns explicitly for states
+    # with no reticulated gas network (see _gas_dollars_per_heat_kwh).
+    no_gas = b["zone"].map(
+        lambda z: cfg.ECONOMIC_ELECTRICITY_ZONES[z]["state"] not in cfg.ECONOMIC_GAS_RATE_C_PER_MJ)
+    gas_cols = [c for c in sums if c.endswith("_heat_gas_aud")]
+    b.loc[no_gas, gas_cols] = np.nan
+
     short = b[b.n_hours < 0.95 * HOURS_PER_YEAR]
     if len(short):
         logger.warning("%d buildings have <95%% of a year of hours (min %d); annualising anyway.",
@@ -673,10 +695,11 @@ def write_workbook(path: Path, results: pd.DataFrame, kinds, bands,
             ws.write(r, 0, k); ws.write(r, 1, v, f["wrap"]); r += 1
 
         def na(df):
-            """Undefined paybacks / break-evens read 'N/A', not blank."""
+            """Undefined cells (paybacks, break-evens, no-gas-network dollars)
+            read 'N/A', not blank — and xlsxwriter can't write a bare NaN."""
             d = df.copy()
             for c in d.columns:
-                if "payback" in c.lower() or "break-even" in c.lower():
+                if d[c].isna().any():
                     d[c] = d[c].astype(object).where(d[c].notna(), "N/A")
             return d
         summary, results = na(summary), na(results)
@@ -720,12 +743,19 @@ def write_workbook(path: Path, results: pd.DataFrame, kinds, bands,
             for vals in g[cols].itertuples(index=False):
                 for c, v in enumerate(vals):
                     kind = "index" if "index" in cols[c] else "text" if c == 0 else "money"
-                    ws.write(r, c, v, f[kind])
+                    if isinstance(v, float) and np.isnan(v):
+                        ws.write(r, c, "N/A", f["text"])
+                    else:
+                        ws.write(r, c, v, f[kind])
                 r += 1
             ws.write(r, 0, "Total", f["bold"])
             for c, name in enumerate(cols):
                 if name.endswith("($)") and name != "Cumulative ($)":
-                    ws.write(r, c, g[name].sum(), f["total"])
+                    total = g[name].sum() if g[name].notna().any() else np.nan
+                    if np.isnan(total):
+                        ws.write(r, c, "N/A", f["text"])
+                    else:
+                        ws.write(r, c, total, f["total"])
             r += 3
     return True
 

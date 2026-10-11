@@ -392,6 +392,21 @@ ECONOMIC_ELECTRICITY_ZONES: dict[str, dict] = {
         ("peak", [(6, 10), (16, 24)], 0.5622),
         ("solar_soak", [(10, 16)], 0.1704),  # source shows "17.0431" — typo; 17.04 used
         ("off_peak", [(0, 6)], 0.3255)]),
+    # Horizon Power A2 residential, 1 Jul 2026. WA's Uniform Tariff Policy means
+    # Horizon Power (regional/remote, incl. Broome) charges the exact same rate
+    # as Synergy's metro A1 — confirmed on wa.gov.au/organisation/energy-policy-wa
+    # /household-electricity-pricing, cross-checked against horizonpower.com.au
+    # /for-home/home-electricity-solutions/a2-residential-tariff/. Flat only —
+    # no ToU product on the standard residential tariff.
+    "HorizonPower": dict(state="WA", flat=0.332621, verified=True,
+                          tou=[("flat", [(0, 24)], 0.332621)]),
+    # Jacana Energy standard residential (Power and Water Corp network), valid
+    # 1 Jul 2026 - 30 Jun 2027 — jacanaenergy.com.au/residential/pricing. Flat
+    # is the default retail plan; an opt-in smart-meter ToU plan exists
+    # (peak 9am-3pm 23.48c, off-peak 30.20c) but is not the standard tariff
+    # Alice Springs buildings would be defaulted onto, so not modelled.
+    "Jacana": dict(state="NT", flat=0.316788, verified=True,
+                   tou=[("flat", [(0, 24)], 0.316788)]),
 }
 
 # Default zone when a file carries no electricity_zone column and --zone isn't
