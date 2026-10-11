@@ -407,6 +407,26 @@ ECONOMIC_ELECTRICITY_ZONES: dict[str, dict] = {
     # Alice Springs buildings would be defaulted onto, so not modelled.
     "Jacana": dict(state="NT", flat=0.316788, verified=True,
                    tou=[("flat", [(0, 24)], 0.316788)]),
+    # Aurora Energy Tariff 93 (Residential Peak and Off-Peak) — the DEFAULT
+    # tariff new TAS residential connections are placed on, 1 Jul 2026 standing
+    # offer schedule (economicregulator.tas.gov.au). Published peak window is
+    # Mon-Fri 7-10am & 4-9pm; modelled here as every day (same simplification
+    # already used for Ausgrid/Energex/SAPN above — no weekday/weekend split
+    # in _hour_rates). "flat" = Tariff 32 (Residential Single Rate), Aurora's
+    # separate flat-rate product, for reference only — not what's priced.
+    "AuroraEnergy": dict(state="TAS", flat=0.2475, verified=True, tou=[
+        ("peak", [(7, 10), (16, 21)], 0.361878),
+        ("off_peak", [(21, 7), (10, 16)], 0.170200)]),
+    # ActewAGL ACT Standard plan, 1 Jul 2026 schedule of charges
+    # (actewagl.com.au/-/media/files/plan%20pricing/2026/act-standard-
+    # electricity-prices-july-2026). Peak/shoulder/off-peak windows apply
+    # every day (published as daily, not weekday-only). "flat" = the
+    # Standard plan's separate flat/accumulation-meter rate, for reference
+    # only — not what's priced under ECONOMIC_TARIFF_STRUCTURE = "tou".
+    "ActewAGL": dict(state="ACT", flat=0.335942, verified=True, tou=[
+        ("peak", [(7, 9), (17, 20)], 0.452000),
+        ("shoulder", [(9, 17), (20, 22)], 0.305146),
+        ("off_peak", [(22, 7)], 0.272000)]),
 }
 
 # Default zone when a file carries no electricity_zone column and --zone isn't
@@ -418,8 +438,20 @@ ECONOMIC_TARIFF_STRUCTURE = "tou"  # "tou" or "flat"
 # c/MJ, state averages, April 2026. Source: EnergyPlans static gas dataset —
 # indicative, not an AER/ESC reference price. Daily supply charge excluded.
 # TODO: confirm whether GST-inclusive (electricity rates above are).
+#
+# TAS and ACT below come from a DIFFERENT source (network/retailer standing
+# offers, not the EnergyPlans dataset) because EnergyPlans doesn't cover
+# them — so don't read a TAS/ACT vs QLD/VIC/NSW/SA gap here as a real
+# price difference; it may partly be a methodology difference. TAS: Tas Gas
+# Networks Hobart residential usage charge, flat, effective 1 Jan 2026
+# (wattever.com.au/cheapest-gas-rates-hobart-tas, Tas Gas Networks tariff
+# schedule). ACT: ActewAGL ACT Standard plan is TIERED (block) pricing, 1 Jul
+# 2025 schedule — 5.13/4.22/3.60/3.50 c/MJ across four usage blocks; the
+# figure below is the highest-volume ("thereafter") block, since a winter
+# heating load normally burns well past the first two blocks.
 ECONOMIC_GAS_RATE_C_PER_MJ: dict[str, float] = {
     "QLD": 2.45, "VIC": 2.58, "NSW": 2.72, "SA": 3.05,
+    "TAS": 5.471, "ACT": 3.50,
 }
 
 # Share of the gas's energy that ends up as heat in the house; the rest goes
